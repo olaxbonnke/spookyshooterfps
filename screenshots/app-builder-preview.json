@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Paper Hollow",
+      "hasCanvas": true,
+      "bodyTextLen": 167,
+      "bodyTextHash": "e87c0ecbeaf2ddee6576fd564d8b4918f325b66425dc5c03033d2e72d4c7b61c",
+      "bodyTextPrefix": "FIRST-PERSON MAZE Paper Hollow Walk the corridors, pocket the st",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Paper Hollow",
+      "hasCanvas": true,
+      "bodyTextLen": 148,
+      "bodyTextHash": "d34a2df6817a8d2793d8b9823e2dfc1a37aa8741b9bfbc23e0f64bac754ffec9",
+      "bodyTextPrefix": "FIRST-PERSON MAZE Paper Hollow Walk the corridors, pocket the st",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}

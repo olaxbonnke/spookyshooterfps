@@ -1,0 +1,1200 @@
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { Crosshair, Pause } from "lucide-react";
+import * as THREE from "three";
+import { ARENAS, arenaBoxes, findArena, rayBoxes, resolveMove, type Aabb, type Arena, type MapId } from "@/game/arenas";
+import { createSfx } from "@/game/sfx";
+import { useP2PRoom } from "@/lib/multiplayer";
+
+type Phase = "menu" | "play" | "paused" | "won" | "lost";
+
+type Hud = {
+  hp: number;
+  foes: number;
+  total: number;
+  map: string;
+};
+
+type Foe = {
+  mesh: THREE.Group;
+  x: number;
+  z: number;
+  hp: number;
+  cool: number;
+  alive: boolean;
+};
+
+type Remote = {
+  id: string;
+  name: string;
+  x: number;
+  z: number;
+  yaw: number;
+  hp: number;
+  at: number;
+};
+
+type Net = {
+  enabled: boolean;
+  selfId: string;
+  name: string;
+  isHost: boolean;
+  remotes: Map<string, Remote>;
+  inbox: { from: string; data: unknown }[];
+  broadcast: (data: unknown) => void;
+  send: (data: unknown, peerId?: string) => void;
+};
+
+const EYE = 1.62;
+const WALK = 6.4;
+const SPRINT = 9.2;
+const RADIUS = 0.36;
+const FOE_R = 0.42;
+const LOOK_SENS = 0.0044;
+
+declare global {
+  interface Window {
+    __controlsTest?: {
+      getYaw: () => number;
+      getSpeed: () => number;
+      getPos: () => { x: number; y: number; z: number };
+      setKeys: (codes: string[]) => void;
+      isInsideWall: () => boolean;
+    };
+  }
+}
+
+function blankNet(): Net {
+  return {
+    enabled: false,
+    selfId: "",
+    name: "You",
+    isHost: true,
+    remotes: new Map(),
+    inbox: [],
+    broadcast: () => {},
+    send: () => {},
+  };
+}
+
+type Props = {
+  map: MapId;
+  name: string;
+  room: string | null;
+  onLeave: (map: MapId) => void;
+};
+
+export function ShooterGame(props: Props) {
+  return <Match {...props} />;
+}
+
+function Match({ map, name, room, onLeave }: Props) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stickRef = useRef({ x: 0, y: 0 });
+  const knobRef = useRef<HTMLDivElement>(null);
+  const netRef = useRef<Net>(blankNet());
+  const onLeaveRef = useRef(onLeave);
+  onLeaveRef.current = onLeave;
+  const p2p = useP2PRoom({ room: room ?? "solo", name, enabled: !!room });
+  const api = useRef({
+    enter: () => {},
+    resume: () => {},
+    pause: () => {},
+    again: () => {},
+    menu: () => {},
+    fire: () => {},
+    setMap: (_id: MapId) => {},
+    next: () => {},
+  });
+  const [phase, setPhase] = useState<Phase>("play");
+  const [mapId, setMapId] = useState<MapId>(map);
+  const [hurt, setHurt] = useState(false);
+  const [hud, setHud] = useState<Hud>({ hp: 100, foes: 6, total: 6, map: "Hedge" });
+  const [lookHint, setLookHint] = useState(true);
+  const [copied, setCopied] = useState(false);
+
+  const connected = p2p.peers.filter((peer) => peer.connectionState === "connected");
+  netRef.current.enabled = !!room;
+  netRef.current.selfId = p2p.selfId;
+  netRef.current.name = name;
+  netRef.current.broadcast = p2p.broadcast;
+  netRef.current.send = p2p.send;
+  const ids = [p2p.selfId, ...connected.map((peer) => peer.id)];
+  netRef.current.isHost = ids.reduce((best, id) => (id < best ? id : best)) === p2p.selfId;
+
+  useEffect(() => p2p.onMessage((from, data) => {
+    netRef.current.inbox.push({ from, data });
+  }), [p2p.onMessage]);
+
+  const copyInvite = () => {
+    if (!room) return;
+    const url = new URL(window.location.href);
+    url.pathname = url.pathname.replace(/\/play\/?$/, "/") || "/";
+    url.search = "";
+    url.searchParams.set("map", mapId);
+    url.searchParams.set("room", room);
+    void navigator.clipboard?.writeText(url.toString()).then(() => setCopied(true)).catch(() => setCopied(false));
+  };
+
+  useEffect(() => {
+    const canvasEl = canvasRef.current;
+    if (!canvasEl) return;
+    const canvas: HTMLCanvasElement = canvasEl;
+    let dead = false;
+    const sfx = createSfx();
+    const held = new Set<string>();
+    const phaseRef = { current: "play" as Phase };
+    const stick = stickRef.current;
+    const mapPick = { current: map };
+
+    const setPhaseBoth = (p: Phase) => {
+      phaseRef.current = p;
+      if (!dead) setPhase(p);
+    };
+
+    const renderer = (() => {
+      try {
+        return new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+      } catch {
+        return null;
+      }
+    })();
+    if (!renderer) {
+      sfx.dispose();
+      return;
+    }
+    const gl = renderer;
+    gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    gl.outputColorSpace = THREE.SRGBColorSpace;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, 1, 0.08, 180);
+    camera.rotation.order = "YXZ";
+    scene.add(camera);
+
+    const hemi = new THREE.HemisphereLight(0xffe0c4, 0x4a3a32, 1.15);
+    scene.add(hemi);
+    const sun = new THREE.DirectionalLight(0xffc48a, 0.95);
+    sun.position.set(-18, 22, 10);
+    scene.add(sun);
+    const flash = new THREE.PointLight(0xffe2a8, 0, 6, 2);
+    camera.add(flash);
+
+    const gun = new THREE.Group();
+    const metal = new THREE.MeshLambertMaterial({ color: 0x2c3138 });
+    const wood = new THREE.MeshLambertMaterial({ color: 0x8a5a32 });
+    const sleeve = new THREE.MeshLambertMaterial({ color: 0xc4895a });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.78), metal);
+    const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.62), metal);
+    barrel.position.set(0, 0.055, -0.52);
+    const guard = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.07, 0.3), metal);
+    guard.position.set(0, -0.01, -0.2);
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.16, 0.07), wood);
+    grip.position.set(0, -0.12, 0.16);
+    grip.rotation.x = 0.45;
+    const stock = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.11, 0.32), wood);
+    stock.position.set(0, 0.01, 0.42);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.42), sleeve);
+    arm.position.set(0.04, -0.16, 0.28);
+    arm.rotation.x = 0.55;
+    gun.add(body, barrel, guard, grip, stock, arm);
+    gun.position.set(0.16, -0.26, -0.48);
+    gun.rotation.y = -0.12;
+    gun.rotation.x = -0.04;
+    gun.traverse((child) => {
+      child.renderOrder = 10;
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh && mesh.material && !Array.isArray(mesh.material)) {
+        mesh.material.depthTest = false;
+        mesh.material.depthWrite = false;
+      }
+    });
+    camera.add(gun);
+
+    const foeMat = new THREE.MeshLambertMaterial({ color: 0x5a2430 });
+    const headMat = new THREE.MeshLambertMaterial({ color: 0xf0d7bf });
+    const floorMat = new THREE.MeshLambertMaterial({ color: 0x5a6a42 });
+    const wallMat = new THREE.MeshLambertMaterial({ color: 0x2c4a34 });
+    const trimMat = new THREE.MeshLambertMaterial({ color: 0xe07a28 });
+    const coverMat = new THREE.MeshLambertMaterial({ color: 0xc45a18 });
+    const pumpMat = new THREE.MeshLambertMaterial({ color: 0xe07020 });
+    const stemMat = new THREE.MeshLambertMaterial({ color: 0x3d5a32 });
+    const tracerMat = new THREE.LineBasicMaterial({ color: 0xffe7a8 });
+    const materials = [metal, wood, sleeve, foeMat, headMat, floorMat, wallMat, trimMat, coverMat, pumpMat, stemMat, tracerMat];
+
+    const world = new THREE.Group();
+    scene.add(world);
+    const geos: THREE.BufferGeometry[] = [body.geometry, barrel.geometry, guard.geometry, grip.geometry, stock.geometry, arm.geometry];
+
+    let arena: Arena = findArena("grass");
+    let boxes: Aabb[] = [];
+    let foes: Foe[] = [];
+    let px = 0;
+    let pz = 0;
+    let yaw = 0;
+    let pitch = 0;
+    const vel = { x: 0, z: 0 };
+    let hp = 100;
+    let aliveFoes = 0;
+    let flashT = 0;
+    let kick = 0;
+    let recoil = 0;
+    let swayX = 0;
+    let swayY = 0;
+    let prevYaw = 0;
+    let prevPitch = 0;
+    let hurtUntil = 0;
+    let boo = 0;
+    const wantFire = { current: false };
+
+    const tracers: { line: THREE.Line; life: number }[] = [];
+    for (let i = 0; i < 10; i++) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+      const line = new THREE.Line(geo, tracerMat);
+      line.visible = false;
+      line.frustumCulled = false;
+      scene.add(line);
+      geos.push(geo);
+      tracers.push({ line, life: 0 });
+    }
+
+    let hudAt = 0;
+    function pushHud(force = false) {
+      if (dead) return;
+      const now = performance.now();
+      if (!force && now - hudAt < 80) return;
+      hudAt = now;
+      setHud({
+        hp: Math.max(0, Math.round(hp)),
+        foes: aliveFoes,
+        total: foes.length,
+        map: arena.name,
+      });
+    }
+
+    function lookDir() {
+      const cp = Math.cos(pitch);
+      return {
+        x: -Math.sin(yaw) * cp,
+        y: -Math.sin(pitch),
+        z: -Math.cos(yaw) * cp,
+      };
+    }
+
+    function trace(ax: number, ay: number, az: number, bx: number, by: number, bz: number, enemy: boolean) {
+      const slot = tracers.find((t) => t.life <= 0) ?? tracers[0];
+      const attr = slot.line.geometry.getAttribute("position") as THREE.BufferAttribute;
+      attr.setXYZ(0, ax, ay, az);
+      attr.setXYZ(1, bx, by, bz);
+      attr.needsUpdate = true;
+      slot.line.visible = true;
+      slot.life = enemy ? 0.08 : 0.05;
+      tracerMat.color.setHex(enemy ? 0xffb15a : 0xfff1c9);
+    }
+
+    function clearWorld() {
+      for (const child of [...world.children]) world.remove(child);
+      foes = [];
+    }
+
+    function build() {
+      clearWorld();
+      arena = findArena(mapPick.current);
+      boxes = arenaBoxes(arena);
+      hp = 100;
+      kick = 0;
+      recoil = 0;
+      boo = 0;
+      px = arena.spawn.x;
+      pz = arena.spawn.z;
+      yaw = arena.spawn.yaw;
+      pitch = 0;
+      vel.x = 0;
+      vel.z = 0;
+      scene.background = new THREE.Color(arena.sky);
+      scene.fog = new THREE.Fog(arena.fog, arena.fogNear, arena.fogFar);
+      gl.setClearColor(arena.sky, 1);
+      floorMat.color.setHex(arena.floor);
+      wallMat.color.setHex(arena.wall);
+      trimMat.color.setHex(arena.trim);
+      coverMat.color.setHex(arena.cover);
+      sun.color.setHex(arena.sun);
+
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(arena.floorW, arena.floorD), floorMat);
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.set(arena.floorX, 0, arena.floorZ);
+      world.add(floor);
+      geos.push(floor.geometry);
+
+      const dummy = new THREE.Object3D();
+      const wallGeo = new THREE.BoxGeometry(1, 1, 1);
+      geos.push(wallGeo);
+      const walls = new THREE.InstancedMesh(wallGeo, wallMat, arena.walls.length);
+      arena.walls.forEach((b, i) => {
+        dummy.position.set((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, (b.minZ + b.maxZ) / 2);
+        dummy.scale.set(Math.max(0.05, b.maxX - b.minX), b.maxY - b.minY, Math.max(0.05, b.maxZ - b.minZ));
+        dummy.rotation.set(0, 0, 0);
+        dummy.updateMatrix();
+        walls.setMatrixAt(i, dummy.matrix);
+      });
+      walls.instanceMatrix.needsUpdate = true;
+      walls.frustumCulled = false;
+      world.add(walls);
+
+      const shieldGeo = new THREE.BoxGeometry(1, 1, 1);
+      geos.push(shieldGeo);
+      if (arena.shields.length) {
+        const shields = new THREE.InstancedMesh(shieldGeo, coverMat, arena.shields.length);
+        arena.shields.forEach((s, i) => {
+          dummy.position.set(s.x, s.h / 2, s.z);
+          dummy.scale.set(s.w, s.h, s.d);
+          dummy.rotation.set(0, 0, 0);
+          dummy.updateMatrix();
+          shields.setMatrixAt(i, dummy.matrix);
+        });
+        shields.instanceMatrix.needsUpdate = true;
+        shields.frustumCulled = false;
+        world.add(shields);
+        const caps = new THREE.InstancedMesh(shieldGeo, trimMat, arena.shields.length);
+        arena.shields.forEach((s, i) => {
+          dummy.position.set(s.x, s.h + 0.08, s.z);
+          dummy.scale.set(s.w + 0.08, 0.16, s.d + 0.08);
+          dummy.rotation.set(0, 0, 0);
+          dummy.updateMatrix();
+          caps.setMatrixAt(i, dummy.matrix);
+        });
+        caps.instanceMatrix.needsUpdate = true;
+        caps.frustumCulled = false;
+        world.add(caps);
+      }
+
+      if (arena.pumpkins.length) {
+        const pumpGeo = new THREE.SphereGeometry(0.42, 7, 6);
+        const stemGeo = new THREE.CylinderGeometry(0.045, 0.06, 0.18, 5);
+        geos.push(pumpGeo, stemGeo);
+        const pumps = new THREE.InstancedMesh(pumpGeo, pumpMat, arena.pumpkins.length);
+        const stems = new THREE.InstancedMesh(stemGeo, stemMat, arena.pumpkins.length);
+        arena.pumpkins.forEach((p, i) => {
+          dummy.position.set(p.x, 0.3 * p.s, p.z);
+          dummy.scale.set(p.s, p.s * 0.78, p.s);
+          dummy.rotation.set(0, 0, 0);
+          dummy.updateMatrix();
+          pumps.setMatrixAt(i, dummy.matrix);
+          dummy.position.set(p.x, 0.58 * p.s, p.z);
+          dummy.scale.set(p.s, p.s, p.s);
+          dummy.updateMatrix();
+          stems.setMatrixAt(i, dummy.matrix);
+        });
+        pumps.instanceMatrix.needsUpdate = true;
+        stems.instanceMatrix.needsUpdate = true;
+        pumps.frustumCulled = false;
+        stems.frustumCulled = false;
+        world.add(pumps, stems);
+      }
+
+      const bodyGeo = new THREE.BoxGeometry(0.62, 1.05, 0.4);
+      const headGeo = new THREE.SphereGeometry(0.24, 8, 6);
+      geos.push(bodyGeo, headGeo);
+      foes = arena.foes.map((spot) => {
+        const group = new THREE.Group();
+        const torso = new THREE.Mesh(bodyGeo, foeMat);
+        torso.position.y = 0.85;
+        const head = new THREE.Mesh(headGeo, headMat);
+        head.position.y = 1.58;
+        group.add(torso, head);
+        group.position.set(spot.x, 0, spot.z);
+        world.add(group);
+        return { mesh: group, x: spot.x, z: spot.z, hp: 100, cool: 0.6 + Math.random() * 0.8, alive: true };
+      });
+      aliveFoes = foes.length;
+      pushHud(true);
+      const net = netRef.current;
+      if (net.enabled && net.isHost) net.send({ k: "map", id: arena.id });
+    }
+
+    function resize() {
+      const w = canvas.clientWidth || window.innerWidth;
+      const h = canvas.clientHeight || window.innerHeight;
+      const aspect = w / Math.max(1, h);
+      gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, window.innerWidth < 900 ? 1 : 1.5));
+      gl.setSize(w, h, false);
+      const horizontal = 90 * (Math.PI / 180);
+      let vertical = (2 * Math.atan(Math.tan(horizontal / 2) / Math.max(aspect, 0.35)) * 180) / Math.PI;
+      vertical = Math.max(54, Math.min(vertical, aspect < 1 ? 96 : 74));
+      camera.aspect = aspect;
+      camera.fov = vertical;
+      camera.updateProjectionMatrix();
+    }
+
+    function tryLock() {
+      const coarse = window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 860;
+      if (coarse) return;
+      try {
+        canvas.requestPointerLock();
+      } catch {
+        /* still playable without a lock */
+      }
+    }
+
+    function shoot() {
+      if (phaseRef.current !== "play" || hp <= 0) return;
+      wantFire.current = true;
+    }
+
+    function enter() {
+      if (dead) return;
+      try {
+        sfx.unlock();
+      } catch {
+        /* audio is optional */
+      }
+      if (phaseRef.current === "won" || phaseRef.current === "lost") return;
+      tryLock();
+      setPhaseBoth("play");
+      pushHud(true);
+    }
+
+    function pause() {
+      if (phaseRef.current !== "play") return;
+      setPhaseBoth("paused");
+      try {
+        document.exitPointerLock();
+      } catch {
+        /* ignore */
+      }
+    }
+
+    function again() {
+      try {
+        sfx.unlock();
+      } catch {
+        /* ignore */
+      }
+      const net = netRef.current;
+      if (net.enabled && !net.isHost) {
+        net.send({ k: "reset" });
+        return;
+      }
+      build();
+      tryLock();
+      setPhaseBoth("play");
+    }
+
+    function leave() {
+      try {
+        document.exitPointerLock();
+      } catch {
+        /* ignore */
+      }
+      onLeaveRef.current(mapPick.current);
+    }
+
+    function setMap(id: MapId) {
+      mapPick.current = id;
+      if (!dead) setMapId(id);
+      if (phaseRef.current === "menu") build();
+    }
+
+    function next() {
+      const i = ARENAS.findIndex((a) => a.id === mapPick.current);
+      const id = ARENAS[(i + 1) % ARENAS.length].id;
+      const net = netRef.current;
+      if (net.enabled && !net.isHost) {
+        net.send({ k: "reset", map: id });
+        return;
+      }
+      setMap(id);
+      again();
+    }
+
+    api.current = { enter, resume: enter, pause, again, menu: leave, fire: shoot, setMap, next };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      held.add(e.code);
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
+      if (e.code === "Escape") pause();
+      if ((e.code === "KeyF" || e.code === "Space") && phaseRef.current === "play") shoot();
+      if ((e.code === "Enter" || e.code === "Space") && (phaseRef.current === "menu" || phaseRef.current === "paused")) {
+        enter();
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => held.delete(e.code);
+    const onBlur = () => {
+      held.clear();
+      stick.x = 0;
+      stick.y = 0;
+    };
+    const onMouse = (e: MouseEvent) => {
+      if (document.pointerLockElement !== canvas || phaseRef.current !== "play") return;
+      yaw -= e.movementX * LOOK_SENS;
+      pitch -= e.movementY * LOOK_SENS;
+      pitch = Math.max(-1.15, Math.min(1.15, pitch));
+    };
+    let sawLock = false;
+    const onLock = () => {
+      const locked = document.pointerLockElement === canvas;
+      if (locked) sawLock = true;
+      else if (sawLock && phaseRef.current === "play") {
+        sawLock = false;
+        setPhaseBoth("paused");
+      }
+    };
+    let lookId: number | null = null;
+    let lookX = 0;
+    let lookY = 0;
+    let edge = 0;
+    let lookTravel = 0;
+    const onPointerDown = (e: PointerEvent) => {
+      if (phaseRef.current !== "play") return;
+      if (e.pointerType === "mouse" && document.pointerLockElement !== canvas) {
+        tryLock();
+        return;
+      }
+      if (document.pointerLockElement === canvas) return;
+      lookId = e.pointerId;
+      lookX = e.clientX;
+      lookY = e.clientY;
+      edge = 0;
+      lookTravel = 0;
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {
+        /* drag still works */
+      }
+    };
+    const onPointerMove = (e: PointerEvent) => {
+      if (e.pointerId !== lookId || phaseRef.current !== "play") return;
+      const dx = e.clientX - lookX;
+      const dy = e.clientY - lookY;
+      lookX = e.clientX;
+      lookY = e.clientY;
+      lookTravel += Math.hypot(dx, dy);
+      const sens = e.pointerType === "mouse" ? 0.0058 : 0.014;
+      if (dx * dx + dy * dy > 4 && !dead) setLookHint(false);
+      yaw -= dx * sens;
+      pitch -= dy * sens * 0.8;
+      pitch = Math.max(-1.15, Math.min(1.15, pitch));
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const margin = Math.min(120, rect.width * 0.24);
+      if (x >= rect.width - margin) edge = (x - (rect.width - margin)) / margin;
+      else if (x <= margin) edge = -((margin - x) / margin);
+      else edge = 0;
+    };
+    const onPointerUp = (e: PointerEvent) => {
+      if (e.pointerId !== lookId) return;
+      const tap = lookTravel < 16;
+      lookId = null;
+      edge = 0;
+      if (tap) shoot();
+    };
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      if (document.pointerLockElement === canvas) shoot();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("resize", resize);
+    const ro = new ResizeObserver(() => resize());
+    ro.observe(canvas);
+    document.addEventListener("mousemove", onMouse);
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("pointerlockchange", onLock);
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
+
+    build();
+    resize();
+    window.__controlsTest = {
+      getYaw: () => yaw,
+      getSpeed: () => Math.hypot(vel.x, vel.z),
+      getPos: () => ({ x: px, y: EYE, z: pz }),
+      setKeys: (codes: string[]) => {
+        held.clear();
+        for (const code of codes) held.add(code);
+        if (phaseRef.current === "menu" || phaseRef.current === "paused") setPhaseBoth("play");
+      },
+      isInsideWall: () => false,
+    };
+
+    const friendMat = new THREE.MeshLambertMaterial({ color: 0x3c7ea6 });
+    materials.push(friendMat);
+    const friendBody = new THREE.BoxGeometry(0.62, 1.05, 0.4);
+    const friendHead = new THREE.SphereGeometry(0.22, 8, 6);
+    geos.push(friendBody, friendHead);
+    const friends = new Map<string, THREE.Group>();
+    const ensureFriend = (id: string) => {
+      const existing = friends.get(id);
+      if (existing) return existing;
+      const group = new THREE.Group();
+      const torso = new THREE.Mesh(friendBody, friendMat);
+      torso.position.y = 0.85;
+      const head = new THREE.Mesh(friendHead, headMat);
+      head.position.y = 1.58;
+      group.add(torso, head);
+      scene.add(group);
+      friends.set(id, group);
+      return group;
+    };
+
+    function strike(foe: Foe) {
+      foe.hp -= 40;
+      sfx.hit();
+      if (foe.hp <= 0) {
+        foe.alive = false;
+        foe.mesh.visible = false;
+        aliveFoes = foes.filter((f) => f.alive).length;
+        pushHud(true);
+      }
+    }
+
+    function sting(amount: number) {
+      if (amount <= 0 || phaseRef.current !== "play") return;
+      hp -= amount;
+      hurtUntil = performance.now() + 260;
+      if (!dead) setHurt(true);
+      sfx.hurt();
+      pushHud(true);
+    }
+
+    function applyMap(id: string) {
+      if (id !== "grass" && id !== "brick" && id !== "palace") return;
+      if (id === arena.id) return;
+      mapPick.current = id;
+      if (!dead) setMapId(id);
+      build();
+    }
+
+    function drain() {
+      const net = netRef.current;
+      const batch = net.inbox.splice(0, 40);
+      for (const msg of batch) {
+        const data = msg.data;
+        if (!data || typeof data !== "object") continue;
+        const packet = data as Record<string, unknown>;
+        if (packet.k === "me") {
+          const x = Number(packet.x);
+          const z = Number(packet.z);
+          if (!Number.isFinite(x) || !Number.isFinite(z)) continue;
+          let remote = net.remotes.get(msg.from);
+          if (!remote) {
+            remote = { id: msg.from, name: "Friend", x, z, yaw: 0, hp: 100, at: 0 };
+            net.remotes.set(msg.from, remote);
+          }
+          remote.x = x;
+          remote.z = z;
+          remote.yaw = Number(packet.yaw) || 0;
+          remote.hp = Number(packet.hp) || remote.hp;
+          remote.name = String(packet.name || remote.name).slice(0, 16);
+          remote.at = performance.now();
+        } else if (packet.k === "foes" && !net.isHost && Array.isArray(packet.foes)) {
+          if (typeof packet.map === "string") applyMap(packet.map);
+          const rows = packet.foes as { x: number; z: number; hp: number; alive: boolean }[];
+          rows.forEach((row, i) => {
+            const foe = foes[i];
+            if (!foe || !row) return;
+            foe.x = Number(row.x) || foe.x;
+            foe.z = Number(row.z) || foe.z;
+            foe.hp = Number(row.hp);
+            foe.alive = !!row.alive;
+            foe.mesh.visible = foe.alive;
+            foe.mesh.position.set(foe.x, 0, foe.z);
+          });
+          aliveFoes = foes.filter((foe) => foe.alive).length;
+          if (aliveFoes > 0 && (phaseRef.current === "won" || phaseRef.current === "lost")) setPhaseBoth("play");
+        } else if (packet.k === "shot" && net.isHost) {
+          const foe = foes[Number(packet.i)];
+          if (foe?.alive) strike(foe);
+        } else if (packet.k === "ouch") {
+          sting(Math.min(20, Number(packet.dmg) || 0));
+        } else if (packet.k === "map" && !net.isHost && typeof packet.id === "string") {
+          applyMap(packet.id);
+        } else if (packet.k === "reset" && net.isHost) {
+          if (typeof packet.map === "string") {
+            if (packet.map === "grass" || packet.map === "brick" || packet.map === "palace") {
+              mapPick.current = packet.map;
+              if (!dead) setMapId(packet.map);
+            }
+          }
+          build();
+          tryLock();
+          setPhaseBoth("play");
+        }
+      }
+    }
+
+    let last = performance.now();
+    let fireCool = 0;
+    let lastMe = 0;
+    let lastFoeSend = 0;
+    const frame = (now: number) => {
+      if (dead) return;
+      let dt = (now - last) / 1000;
+      last = now;
+      if (dt > 0.05) dt = 0.05;
+      if (dt < 0) dt = 0;
+      drain();
+      const playing = phaseRef.current === "play";
+      fireCool = Math.max(0, fireCool - dt);
+      flashT = Math.max(0, flashT - dt);
+      flash.intensity = flashT > 0 ? 8 : 0;
+
+      if (playing) {
+        const turn = (held.has("KeyQ") ? 1 : 0) - (held.has("KeyE") ? 1 : 0);
+        yaw += turn * 2.4 * dt;
+        if (lookId !== null && edge !== 0) yaw -= edge * 2.6 * dt;
+
+        const fx = -Math.sin(yaw);
+        const fz = -Math.cos(yaw);
+        const rx = Math.cos(yaw);
+        const rz = -Math.sin(yaw);
+        let wx = 0;
+        let wz = 0;
+        if (held.has("KeyW") || held.has("ArrowUp")) {
+          wx += fx;
+          wz += fz;
+        }
+        if (held.has("KeyS") || held.has("ArrowDown")) {
+          wx -= fx;
+          wz -= fz;
+        }
+        if (held.has("KeyD") || held.has("ArrowRight")) {
+          wx += rx;
+          wz += rz;
+        }
+        if (held.has("KeyA") || held.has("ArrowLeft")) {
+          wx -= rx;
+          wz -= rz;
+        }
+        let sx = stick.x;
+        let sy = stick.y;
+        if (sx * sx + sy * sy < 0.02) {
+          sx = 0;
+          sy = 0;
+        }
+        wx += rx * sx + fx * sy;
+        wz += rz * sx + fz * sy;
+        const mag = Math.hypot(wx, wz);
+        const sprint = held.has("ShiftLeft") || held.has("ShiftRight");
+        const clipped = mag > 1 ? 1 : mag;
+        const target = (sprint ? SPRINT : WALK) * clipped;
+        const wishX = mag > 0 ? (wx / mag) * target : 0;
+        const wishZ = mag > 0 ? (wz / mag) * target : 0;
+        const k = 1 - Math.exp(-14 * dt);
+        vel.x += (wishX - vel.x) * k;
+        vel.z += (wishZ - vel.z) * k;
+        const moved = resolveMove(px, pz, vel.x * dt, vel.z * dt, RADIUS, boxes);
+        px = moved.x;
+        pz = moved.z;
+
+        const dir = lookDir();
+        if (wantFire.current && fireCool <= 0) {
+          wantFire.current = false;
+          fireCool = 0.2;
+          kick = 1;
+          recoil = Math.min(0.07, recoil + 0.02);
+          flashT = 0.045;
+          sfx.shot();
+          const wallT = rayBoxes(px, EYE, pz, dir.x, dir.y, dir.z, 60, boxes);
+          let best = wallT;
+          let foe: Foe | null = null;
+          for (const f of foes) {
+            if (!f.alive) continue;
+            const vx = f.x - px;
+            const vy = 1.15 - EYE;
+            const vz = f.z - pz;
+            const t = vx * dir.x + vy * dir.y + vz * dir.z;
+            if (t < 0.6 || t > best) continue;
+            const hx = px + dir.x * t;
+            const hy = EYE + dir.y * t;
+            const hz = pz + dir.z * t;
+            const miss = (hx - f.x) ** 2 + (hz - f.z) ** 2;
+            if (miss < 0.55 * 0.55 && hy > 0.2 && hy < 1.9) {
+              best = t;
+              foe = f;
+            }
+          }
+          const hx = px + dir.x * best;
+          const hy = EYE + dir.y * best;
+          const hz = pz + dir.z * best;
+          trace(px + dir.x * 0.4, EYE - 0.15, pz + dir.z * 0.4, hx, hy, hz, !!foe);
+          if (foe) {
+            const net = netRef.current;
+            if (!net.enabled || net.isHost) strike(foe);
+            else net.send({ k: "shot", i: foes.indexOf(foe) });
+          }
+        } else if (!wantFire.current) {
+          /* keep a queued tap */
+        } else {
+          /* still cooling */
+        }
+
+        const simulate = !netRef.current.enabled || netRef.current.isHost;
+        if (simulate) {
+          const squad: { id: string; x: number; z: number }[] = [{ id: "self", x: px, z: pz }];
+          if (netRef.current.enabled) {
+            for (const remote of netRef.current.remotes.values()) {
+              if (now - remote.at < 2000) squad.push({ id: remote.id, x: remote.x, z: remote.z });
+            }
+          }
+          for (const f of foes) {
+            if (!f.alive) continue;
+            f.cool = Math.max(0, f.cool - dt);
+            let target = squad[0];
+            let bestD = Infinity;
+            for (const player of squad) {
+              const d = (player.x - f.x) ** 2 + (player.z - f.z) ** 2;
+              if (d < bestD) {
+                bestD = d;
+                target = player;
+              }
+            }
+            const toX = target.x - f.x;
+            const toZ = target.z - f.z;
+            const dist = Math.hypot(toX, toZ) || 1;
+            const ndx = toX / dist;
+            const ndz = toZ / dist;
+            const see = rayBoxes(f.x, 1.4, f.z, ndx, 0, ndz, dist, boxes) >= dist - 0.3;
+            if (dist > 6.5 || !see) {
+              const step = resolveMove(f.x, f.z, ndx * 3.1 * dt, ndz * 3.1 * dt, FOE_R, boxes);
+              f.x = step.x;
+              f.z = step.z;
+            }
+            if (target.id === "self") {
+              const gapX = px - f.x;
+              const gapZ = pz - f.z;
+              const gap = Math.hypot(gapX, gapZ);
+              if (gap < 0.95 && gap > 0.001) {
+                const push = (0.95 - gap) / gap;
+                const away = resolveMove(px, pz, gapX * push, gapZ * push, RADIUS, boxes);
+                px = away.x;
+                pz = away.z;
+                const back = resolveMove(f.x, f.z, -gapX * push, -gapZ * push, FOE_R, boxes);
+                f.x = back.x;
+                f.z = back.z;
+                if (boo <= 0) {
+                  boo = 0.7;
+                  sting(8);
+                }
+              }
+            } else if (dist < 0.95 && f.cool <= 0) {
+              f.cool = 0.7;
+              netRef.current.send({ k: "ouch", dmg: 8 }, target.id);
+            }
+            f.mesh.position.set(f.x, 0, f.z);
+            f.mesh.lookAt(target.x, 0, target.z);
+            if (see && dist < 22 && f.cool <= 0) {
+              f.cool = 1.45;
+              const spread = (Math.random() - 0.5) * 0.22;
+              const syaw = Math.atan2(ndx, ndz) + spread;
+              const sdx = Math.sin(syaw);
+              const sdz = Math.cos(syaw);
+              const blocked = rayBoxes(f.x, 1.4, f.z, sdx, 0, sdz, dist, boxes);
+              trace(f.x, 1.4, f.z, f.x + sdx * Math.min(dist, blocked), 1.45, f.z + sdz * Math.min(dist, blocked), true);
+              if (blocked >= dist - 0.4 && Math.abs(spread) < 0.09) {
+                if (target.id === "self") sting(12);
+                else netRef.current.send({ k: "ouch", dmg: 12 }, target.id);
+              }
+            }
+          }
+        } else {
+          for (const f of foes) {
+            if (!f.alive) continue;
+            f.mesh.position.set(f.x, 0, f.z);
+          }
+        }
+        boo = Math.max(0, boo - dt);
+
+        if (aliveFoes <= 0 && phaseRef.current === "play") {
+          setPhaseBoth("won");
+          sfx.win();
+          try {
+            document.exitPointerLock();
+          } catch {
+            /* ignore */
+          }
+        } else if (hp <= 0 && phaseRef.current === "play") {
+          hp = 0;
+          setPhaseBoth("lost");
+          sfx.lose();
+          pushHud(true);
+          try {
+            document.exitPointerLock();
+          } catch {
+            /* ignore */
+          }
+        }
+      } else {
+        vel.x *= Math.exp(-10 * dt);
+        vel.z *= Math.exp(-10 * dt);
+      }
+
+      kick = Math.max(0, kick - dt * 6);
+      recoil = Math.max(0, recoil - dt * 0.55);
+      const net = netRef.current;
+      if (net.enabled && (playing || phaseRef.current === "paused")) {
+        if (now - lastMe > 50) {
+          lastMe = now;
+          net.broadcast({ k: "me", x: px, z: pz, yaw, pitch, hp, name: net.name });
+        }
+        if (net.isHost && now - lastFoeSend > 100) {
+          lastFoeSend = now;
+          net.broadcast({
+            k: "foes",
+            map: arena.id,
+            foes: foes.map((foe) => ({ x: foe.x, z: foe.z, hp: foe.hp, alive: foe.alive })),
+          });
+        }
+      }
+      const seen = new Set<string>();
+      for (const remote of net.remotes.values()) {
+        seen.add(remote.id);
+        const group = ensureFriend(remote.id);
+        const fresh = now - remote.at < 2500;
+        group.visible = fresh;
+        if (!fresh) continue;
+        group.position.set(remote.x, 0, remote.z);
+        group.rotation.y = remote.yaw;
+      }
+      for (const [id, group] of friends) {
+        if (!seen.has(id)) group.visible = false;
+      }
+      const lookDx = yaw - prevYaw;
+      const lookDy = pitch - prevPitch;
+      prevYaw = yaw;
+      prevPitch = pitch;
+      swayX += (-lookDx * 0.55 - swayX) * Math.min(1, dt * 8);
+      swayY += (lookDy * 0.35 - swayY) * Math.min(1, dt * 8);
+      const moving = Math.hypot(vel.x, vel.z);
+      const bob = Math.sin(now * 0.012) * Math.min(0.025, moving * 0.0035);
+      gun.position.set(0.16 + swayX * 0.4, -0.26 + swayY * 0.4 + bob, -0.48 + kick * 0.08);
+      gun.rotation.y = -0.12 - swayX * 0.35;
+      gun.rotation.z = -swayX * 0.25;
+      gun.rotation.x = -0.04 - kick * 0.4;
+      camera.position.set(px, EYE, pz);
+      if (phaseRef.current === "menu") {
+        yaw = arena.spawn.yaw + Math.sin(now * 0.0004) * 0.18;
+        pitch = -0.06;
+      }
+      camera.rotation.y = yaw;
+      camera.rotation.x = pitch + recoil;
+      camera.rotation.z = 0;
+
+      for (const t of tracers) {
+        if (t.life <= 0) continue;
+        t.life -= dt;
+        if (t.life <= 0) t.line.visible = false;
+      }
+      if (hurtUntil && performance.now() > hurtUntil) {
+        hurtUntil = 0;
+        if (!dead) setHurt(false);
+      }
+      gl.render(scene, camera);
+    };
+    gl.setAnimationLoop(frame);
+
+    return () => {
+      dead = true;
+      gl.setAnimationLoop(null);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("resize", resize);
+      ro.disconnect();
+      document.removeEventListener("mousemove", onMouse);
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("pointerlockchange", onLock);
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointercancel", onPointerUp);
+      if (window.__controlsTest) delete window.__controlsTest;
+      for (const g of geos) g.dispose();
+      for (const m of materials) m.dispose();
+      gl.dispose();
+      sfx.dispose();
+    };
+  }, []);
+
+  const showHud = phase === "play" || phase === "paused" || phase === "won" || phase === "lost";
+
+  return (
+    <div className={phase === "play" ? "game-root is-play" : "game-root"}>
+      <canvas ref={canvasRef} className="view" />
+      <div className={hurt ? "vignette on" : "vignette"} aria-hidden="true" />
+      {phase === "play" ? <div className="crosshair" aria-hidden="true" /> : null}
+      <div className={showHud ? "hud" : "hud hud-quiet"}>
+        <div className="hud-top">
+          <div className="stack">
+            <div className="chip">
+              <Crosshair aria-hidden="true" />
+              <span>
+                {hud.foes}/{hud.total}
+              </span>
+            </div>
+            {room ? (
+              <div className="chip">
+                <span>{room}</span>
+                <span>{connected.length + 1}</span>
+              </div>
+            ) : null}
+            <div className="chip hp-chip">
+              <span className="hp" aria-label={`Health ${hud.hp}`}>
+                <span style={{ width: `${hud.hp}%` }} />
+              </span>
+              <span>{hud.hp}</span>
+            </div>
+            {phase === "play" ? <p className="objective">{hud.map}. Clear the labyrinth.</p> : null}
+          </div>
+          <div className="stack stack-end">
+            {phase === "play" ? (
+              <button type="button" className="icon-btn" onClick={() => api.current.pause()} aria-label="Pause">
+                <Pause />
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {phase === "play" && lookHint ? <p className="look-hint touch-only">Drag to aim. Fire shoots.</p> : <span />}
+      </div>
+
+      {phase === "paused" || phase === "won" || phase === "lost" ? (
+        <div className="scrim">
+          {phase === "paused" ? (
+            <section className="card">
+              <p className="kicker">Holding</p>
+              <h1>Paused</h1>
+              {room ? <p className="code-line">Room <strong>{room}</strong></p> : null}
+              <div className="actions">
+                <button type="button" className="btn" onClick={() => api.current.resume()}>
+                  Resume
+                </button>
+                {room ? (
+                  <button type="button" className="btn btn-ghost" onClick={copyInvite}>
+                    {copied ? "Link copied" : "Copy invite link"}
+                  </button>
+                ) : null}
+                <button type="button" className="btn btn-ghost" onClick={() => api.current.menu()}>
+                  Home
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          {phase === "won" ? (
+            <section className="card">
+              <p className="kicker">{hud.map}</p>
+              <h1>Labyrinth clear</h1>
+              <p>Every figure in this labyrinth is down.</p>
+              <div className="actions">
+                <button type="button" className="btn" onClick={() => api.current.next()}>
+                  Next labyrinth
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={() => api.current.again()}>
+                  Replay
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={() => api.current.menu()}>
+                  Home
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          {phase === "lost" ? (
+            <section className="card">
+              <p className="kicker">{hud.map}</p>
+              <h1>Down</h1>
+              <p>They got through. Use the barricades and try again, or pick another labyrinth at home.</p>
+              <div className="actions">
+                <button type="button" className="btn" onClick={() => api.current.again()}>
+                  Retry
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={() => api.current.menu()}>
+                  Home
+                </button>
+              </div>
+            </section>
+          ) : null}
+        </div>
+      ) : null}
+
+      <button type="button" className="swing" onClick={() => api.current.fire()}>
+        Fire
+      </button>
+      <Joystick
+        knobRef={knobRef}
+        onChange={(x, y) => {
+          stickRef.current.x = x;
+          stickRef.current.y = y;
+        }}
+      />
+    </div>
+  );
+}
+
+function Joystick({
+  knobRef,
+  onChange,
+}: {
+  knobRef: RefObject<HTMLDivElement | null>;
+  onChange: (x: number, y: number) => void;
+}) {
+  const baseRef = useRef<HTMLDivElement>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    const el = baseRef.current;
+    const knob = knobRef.current;
+    if (!el || !knob) return;
+    let id: number | null = null;
+    const origin = { x: 0, y: 0 };
+    const place = (x: number, y: number) => {
+      knob.style.transform = `translate(${x * 40}px, ${y * 40}px)`;
+    };
+    const down = (e: PointerEvent) => {
+      id = e.pointerId;
+      el.setPointerCapture(e.pointerId);
+      const r = el.getBoundingClientRect();
+      origin.x = r.left + r.width / 2;
+      origin.y = r.top + r.height / 2;
+      move(e);
+    };
+    const move = (e: PointerEvent) => {
+      if (e.pointerId !== id) return;
+      const dx = e.clientX - origin.x;
+      const dy = e.clientY - origin.y;
+      const mag = Math.hypot(dx, dy) || 1;
+      const k = Math.min(1, mag / 46);
+      const nx = (dx / mag) * k;
+      const ny = (-dy / mag) * k;
+      place(nx, -ny);
+      onChangeRef.current(nx, ny);
+    };
+    const up = (e: PointerEvent) => {
+      if (e.pointerId !== id) return;
+      id = null;
+      place(0, 0);
+      onChangeRef.current(0, 0);
+    };
+    el.addEventListener("pointerdown", down);
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+    return () => {
+      el.removeEventListener("pointerdown", down);
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+    };
+  }, [knobRef]);
+
+  return (
+    <div ref={baseRef} className="stick touch-only" aria-label="Move">
+      <div ref={knobRef} className="stick-knob" />
+    </div>
+  );
+}
