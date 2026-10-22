@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
-import { Crosshair, Pause } from "lucide-react";
+import { Check, Copy, Crosshair, Pause, Play, RefreshCw, RotateCcw, Shield, Skull, Sparkles, User, Users, Volume2 } from "lucide-react";
 import * as THREE from "three";
 import { ARENAS, arenaBoxes, findArena, rayBoxes, resolveMove, type Aabb, type Arena, type MapId } from "@/game/arenas";
 import { createSfx } from "@/game/sfx";
@@ -67,7 +67,7 @@ function blankNet(): Net {
   return {
     enabled: false,
     selfId: "",
-    name: "You",
+    name: "Ranger",
     isHost: true,
     remotes: new Map(),
     inbox: [],
@@ -108,9 +108,16 @@ function Match({ map, name, room, onLeave }: Props) {
   const [phase, setPhase] = useState<Phase>("play");
   const [mapId, setMapId] = useState<MapId>(map);
   const [hurt, setHurt] = useState(false);
+  const [hitMarker, setHitMarker] = useState(false);
   const [hud, setHud] = useState<Hud>({ hp: 100, foes: 6, total: 6, map: "Hedge" });
   const [lookHint, setLookHint] = useState(true);
   const [copied, setCopied] = useState(false);
+
+  const onHitRef = useRef<() => void>(() => {});
+  onHitRef.current = () => {
+    setHitMarker(true);
+    setTimeout(() => setHitMarker(false), 90);
+  };
 
   const connected = p2p.peers.filter((peer) => peer.connectionState === "connected");
   netRef.current.enabled = !!room;
@@ -132,7 +139,13 @@ function Match({ map, name, room, onLeave }: Props) {
     url.search = "";
     url.searchParams.set("map", mapId);
     url.searchParams.set("room", room);
-    void navigator.clipboard?.writeText(url.toString()).then(() => setCopied(true)).catch(() => setCopied(false));
+    void navigator.clipboard
+      ?.writeText(url.toString())
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2400);
+      })
+      .catch(() => setCopied(false));
   };
 
   useEffect(() => {
@@ -165,24 +178,41 @@ function Match({ map, name, room, onLeave }: Props) {
     const gl = renderer;
     gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     gl.outputColorSpace = THREE.SRGBColorSpace;
+    gl.toneMapping = THREE.ACESFilmicToneMapping;
+    gl.toneMappingExposure = 1.3;
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(70, 1, 0.08, 180);
+    const camera = new THREE.PerspectiveCamera(70, 1, 0.05, 200);
     camera.rotation.order = "YXZ";
     scene.add(camera);
 
-    const hemi = new THREE.HemisphereLight(0xffe0c4, 0x4a3a32, 1.15);
+    // Ambient fill light: guarantees geometry is never pitch-black void
+    const ambient = new THREE.AmbientLight(0xffffff, 0.75);
+    scene.add(ambient);
+
+    // Atmospheric sky & ground hemisphere light
+    const hemi = new THREE.HemisphereLight(0xffeedd, 0x3d3028, 2.0);
     scene.add(hemi);
-    const sun = new THREE.DirectionalLight(0xffc48a, 0.95);
-    sun.position.set(-18, 22, 10);
+
+    // Directional sunlight
+    const sun = new THREE.DirectionalLight(0xffd8aa, 2.4);
+    sun.position.set(-18, 28, 12);
     scene.add(sun);
-    const flash = new THREE.PointLight(0xffe2a8, 0, 6, 2);
+
+    // Tactical Player Flashlight / Lantern: moves with camera, casts dynamic light ahead in corridors
+    const lantern = new THREE.PointLight(0xffecd0, 42, 28, 1.8);
+    lantern.position.set(0, 0, 0);
+    camera.add(lantern);
+
+    // Muzzle flash point light
+    const flash = new THREE.PointLight(0xffaa44, 0, 14, 2);
     camera.add(flash);
 
+    // Tactical Shotgun / Rifle Model
     const gun = new THREE.Group();
-    const metal = new THREE.MeshLambertMaterial({ color: 0x2c3138 });
-    const wood = new THREE.MeshLambertMaterial({ color: 0x8a5a32 });
-    const sleeve = new THREE.MeshLambertMaterial({ color: 0xc4895a });
+    const metal = new THREE.MeshStandardMaterial({ color: 0x1c2026, roughness: 0.35, metalness: 0.85 });
+    const wood = new THREE.MeshStandardMaterial({ color: 0x5a341e, roughness: 0.65, metalness: 0.08 });
+    const sleeve = new THREE.MeshStandardMaterial({ color: 0x242832, roughness: 0.85 });
     const body = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.78), metal);
     const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.62), metal);
     barrel.position.set(0, 0.055, -0.52);
@@ -210,16 +240,18 @@ function Match({ map, name, room, onLeave }: Props) {
     });
     camera.add(gun);
 
-    const foeMat = new THREE.MeshLambertMaterial({ color: 0x5a2430 });
-    const headMat = new THREE.MeshLambertMaterial({ color: 0xf0d7bf });
-    const floorMat = new THREE.MeshLambertMaterial({ color: 0x5a6a42 });
-    const wallMat = new THREE.MeshLambertMaterial({ color: 0x2c4a34 });
-    const trimMat = new THREE.MeshLambertMaterial({ color: 0xe07a28 });
-    const coverMat = new THREE.MeshLambertMaterial({ color: 0xc45a18 });
-    const pumpMat = new THREE.MeshLambertMaterial({ color: 0xe07020 });
-    const stemMat = new THREE.MeshLambertMaterial({ color: 0x3d5a32 });
-    const tracerMat = new THREE.LineBasicMaterial({ color: 0xffe7a8 });
-    const materials = [metal, wood, sleeve, foeMat, headMat, floorMat, wallMat, trimMat, coverMat, pumpMat, stemMat, tracerMat];
+    // Upgraded Materials using MeshStandardMaterial with atmospheric emissive highlights
+    const foeMat = new THREE.MeshStandardMaterial({ color: 0x7a2228, roughness: 0.55, emissive: 0x440810, emissiveIntensity: 0.45 });
+    const headMat = new THREE.MeshStandardMaterial({ color: 0xd8c5b2, roughness: 0.65 });
+    const eyeMat = new THREE.MeshStandardMaterial({ color: 0xff1133, emissive: 0xff0022, emissiveIntensity: 2.2 });
+    const floorMat = new THREE.MeshStandardMaterial({ color: 0x5a6a42, roughness: 0.85, metalness: 0.08 });
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x2c4a34, roughness: 0.78, metalness: 0.12 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0xe07a28, roughness: 0.45, emissive: 0x773300, emissiveIntensity: 0.4 });
+    const coverMat = new THREE.MeshStandardMaterial({ color: 0xc45a18, roughness: 0.75 });
+    const pumpMat = new THREE.MeshStandardMaterial({ color: 0xff6611, roughness: 0.45, emissive: 0xb53c00, emissiveIntensity: 0.75 });
+    const stemMat = new THREE.MeshStandardMaterial({ color: 0x3d5a32, roughness: 0.9 });
+    const tracerMat = new THREE.LineBasicMaterial({ color: 0xffe7a8, linewidth: 2 });
+    const materials = [metal, wood, sleeve, foeMat, headMat, eyeMat, floorMat, wallMat, trimMat, coverMat, pumpMat, stemMat, tracerMat];
 
     const world = new THREE.Group();
     scene.add(world);
@@ -289,7 +321,7 @@ function Match({ map, name, room, onLeave }: Props) {
       attr.needsUpdate = true;
       slot.line.visible = true;
       slot.life = enemy ? 0.08 : 0.05;
-      tracerMat.color.setHex(enemy ? 0xffb15a : 0xfff1c9);
+      tracerMat.color.setHex(enemy ? 0xff4433 : 0xffe6a8);
     }
 
     function clearWorld() {
@@ -312,20 +344,24 @@ function Match({ map, name, room, onLeave }: Props) {
       vel.x = 0;
       vel.z = 0;
       scene.background = new THREE.Color(arena.sky);
-      scene.fog = new THREE.Fog(arena.fog, arena.fogNear, arena.fogFar);
+      scene.fog = new THREE.Fog(arena.fog, 6, 52);
       gl.setClearColor(arena.sky, 1);
       floorMat.color.setHex(arena.floor);
       wallMat.color.setHex(arena.wall);
       trimMat.color.setHex(arena.trim);
       coverMat.color.setHex(arena.cover);
       sun.color.setHex(arena.sun);
+      lantern.color.setHex(0xffedd0);
 
-      const floor = new THREE.Mesh(new THREE.PlaneGeometry(arena.floorW, arena.floorD), floorMat);
+      // Floor plane
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(arena.floorW, arena.floorD, 4, 4), floorMat);
       floor.rotation.x = -Math.PI / 2;
       floor.position.set(arena.floorX, 0, arena.floorZ);
+      floor.frustumCulled = false;
       world.add(floor);
       geos.push(floor.geometry);
 
+      // Maze walls
       const dummy = new THREE.Object3D();
       const wallGeo = new THREE.BoxGeometry(1, 1, 1);
       geos.push(wallGeo);
@@ -341,6 +377,7 @@ function Match({ map, name, room, onLeave }: Props) {
       walls.frustumCulled = false;
       world.add(walls);
 
+      // Tactical cover / barricades
       const shieldGeo = new THREE.BoxGeometry(1, 1, 1);
       geos.push(shieldGeo);
       if (arena.shields.length) {
@@ -355,6 +392,7 @@ function Match({ map, name, room, onLeave }: Props) {
         shields.instanceMatrix.needsUpdate = true;
         shields.frustumCulled = false;
         world.add(shields);
+
         const caps = new THREE.InstancedMesh(shieldGeo, trimMat, arena.shields.length);
         arena.shields.forEach((s, i) => {
           dummy.position.set(s.x, s.h + 0.08, s.z);
@@ -368,8 +406,9 @@ function Match({ map, name, room, onLeave }: Props) {
         world.add(caps);
       }
 
+      // Glowing Jack-o'-lantern pumpkins
       if (arena.pumpkins.length) {
-        const pumpGeo = new THREE.SphereGeometry(0.42, 7, 6);
+        const pumpGeo = new THREE.SphereGeometry(0.42, 8, 7);
         const stemGeo = new THREE.CylinderGeometry(0.045, 0.06, 0.18, 5);
         geos.push(pumpGeo, stemGeo);
         const pumps = new THREE.InstancedMesh(pumpGeo, pumpMat, arena.pumpkins.length);
@@ -392,17 +431,24 @@ function Match({ map, name, room, onLeave }: Props) {
         world.add(pumps, stems);
       }
 
+      // Foes with glowing red eyes
       const bodyGeo = new THREE.BoxGeometry(0.62, 1.05, 0.4);
       const headGeo = new THREE.SphereGeometry(0.24, 8, 6);
-      geos.push(bodyGeo, headGeo);
+      const eyeGeo = new THREE.SphereGeometry(0.05, 6, 4);
+      geos.push(bodyGeo, headGeo, eyeGeo);
       foes = arena.foes.map((spot) => {
         const group = new THREE.Group();
         const torso = new THREE.Mesh(bodyGeo, foeMat);
         torso.position.y = 0.85;
         const head = new THREE.Mesh(headGeo, headMat);
         head.position.y = 1.58;
-        group.add(torso, head);
+        const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+        eyeL.position.set(-0.08, 1.62, -0.22);
+        const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+        eyeR.position.set(0.08, 1.62, -0.22);
+        group.add(torso, head, eyeL, eyeR);
         group.position.set(spot.x, 0, spot.z);
+        group.frustumCulled = false;
         world.add(group);
         return { mesh: group, x: spot.x, z: spot.z, hp: 100, cool: 0.6 + Math.random() * 0.8, alive: true };
       });
@@ -621,7 +667,7 @@ function Match({ map, name, room, onLeave }: Props) {
       isInsideWall: () => false,
     };
 
-    const friendMat = new THREE.MeshLambertMaterial({ color: 0x3c7ea6 });
+    const friendMat = new THREE.MeshStandardMaterial({ color: 0x2b82ba, roughness: 0.5, emissive: 0x0f4066, emissiveIntensity: 0.5 });
     materials.push(friendMat);
     const friendBody = new THREE.BoxGeometry(0.62, 1.05, 0.4);
     const friendHead = new THREE.SphereGeometry(0.22, 8, 6);
@@ -644,6 +690,7 @@ function Match({ map, name, room, onLeave }: Props) {
     function strike(foe: Foe) {
       foe.hp -= 40;
       sfx.hit();
+      onHitRef.current();
       if (foe.hp <= 0) {
         foe.alive = false;
         foe.mesh.visible = false;
@@ -741,7 +788,7 @@ function Match({ map, name, room, onLeave }: Props) {
       const playing = phaseRef.current === "play";
       fireCool = Math.max(0, fireCool - dt);
       flashT = Math.max(0, flashT - dt);
-      flash.intensity = flashT > 0 ? 8 : 0;
+      flash.intensity = flashT > 0 ? 12 : 0;
 
       if (playing) {
         const turn = (held.has("KeyQ") ? 1 : 0) - (held.has("KeyE") ? 1 : 0);
@@ -827,10 +874,6 @@ function Match({ map, name, room, onLeave }: Props) {
             if (!net.enabled || net.isHost) strike(foe);
             else net.send({ k: "shot", i: foes.indexOf(foe) });
           }
-        } else if (!wantFire.current) {
-          /* keep a queued tap */
-        } else {
-          /* still cooling */
         }
 
         const simulate = !netRef.current.enabled || netRef.current.isHost;
@@ -1021,99 +1064,178 @@ function Match({ map, name, room, onLeave }: Props) {
   }, []);
 
   const showHud = phase === "play" || phase === "paused" || phase === "won" || phase === "lost";
+  const hpPercent = Math.max(0, Math.min(100, hud.hp));
+  const isCriticalHp = hud.hp < 30;
 
   return (
     <div className={phase === "play" ? "game-root is-play" : "game-root"}>
       <canvas ref={canvasRef} className="view" />
       <div className={hurt ? "vignette on" : "vignette"} aria-hidden="true" />
-      {phase === "play" ? <div className="crosshair" aria-hidden="true" /> : null}
+      
+      {/* Modern esports-grade crosshair with hitmarker */}
+      {phase === "play" ? (
+        <div className="crosshair" aria-hidden="true">
+          <div className="crosshair-dot" />
+          <div className="crosshair-line crosshair-t" />
+          <div className="crosshair-line crosshair-b" />
+          <div className="crosshair-line crosshair-l" />
+          <div className="crosshair-line crosshair-r" />
+          <div className={hitMarker ? "hitmarker active" : "hitmarker"} />
+        </div>
+      ) : null}
+
+      {/* Modern Tactical Glassmorphic HUD */}
       <div className={showHud ? "hud" : "hud hud-quiet"}>
         <div className="hud-top">
           <div className="stack">
-            <div className="chip">
-              <Crosshair aria-hidden="true" />
-              <span>
-                {hud.foes}/{hud.total}
-              </span>
+            <div className="stack-row">
+              {/* Hostile Threat Counter */}
+              <div className="chip chip-hot">
+                <Skull aria-hidden="true" />
+                <span>
+                  {hud.foes} / {hud.total} HOSTILES
+                </span>
+              </div>
+
+              {/* Multiplayer Frequency Badge */}
+              {room ? (
+                <div className="chip chip-neon">
+                  <Users className="w-4 h-4 text-[var(--color-neon-blue)]" aria-hidden="true" />
+                  <span className="font-mono">{room}</span>
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-white/10">{connected.length + 1} SQUAD</span>
+                </div>
+              ) : null}
+
+              {/* Health integrity chip */}
+              <div className={`chip hp-chip ${isCriticalHp ? "border-red-500/50" : ""}`}>
+                <Shield className={`w-4 h-4 ${isCriticalHp ? "text-red-500 animate-pulse" : "text-emerald-400"}`} />
+                <div className={`hp ${isCriticalHp ? "hp-critical" : ""}`} aria-label={`Health ${hud.hp}`}>
+                  <span style={{ width: `${hpPercent}%` }} />
+                </div>
+                <span className={isCriticalHp ? "text-red-400 font-bold" : ""}>{hud.hp}</span>
+              </div>
             </div>
-            {room ? (
-              <div className="chip">
-                <span>{room}</span>
-                <span>{connected.length + 1}</span>
+
+            {/* Tactical Objective Callout */}
+            {phase === "play" ? (
+              <div className="objective">
+                <span className="objective-tag">{hud.map}</span>
+                <span>Purge all hostiles from the labyrinth corridors.</span>
               </div>
             ) : null}
-            <div className="chip hp-chip">
-              <span className="hp" aria-label={`Health ${hud.hp}`}>
-                <span style={{ width: `${hud.hp}%` }} />
-              </span>
-              <span>{hud.hp}</span>
-            </div>
-            {phase === "play" ? <p className="objective">{hud.map}. Clear the labyrinth.</p> : null}
           </div>
+
           <div className="stack stack-end">
             {phase === "play" ? (
-              <button type="button" className="icon-btn" onClick={() => api.current.pause()} aria-label="Pause">
+              <button type="button" className="icon-btn" onClick={() => api.current.pause()} aria-label="Pause Mission">
                 <Pause />
               </button>
             ) : null}
           </div>
         </div>
-        {phase === "play" && lookHint ? <p className="look-hint touch-only">Drag to aim. Fire shoots.</p> : <span />}
+
+        {phase === "play" && lookHint ? (
+          <p className="look-hint touch-only">Drag right side to aim • Tap Fire to shoot</p>
+        ) : (
+          <span />
+        )}
       </div>
 
+      {/* Overlays: Paused / Victory / Defeat */}
       {phase === "paused" || phase === "won" || phase === "lost" ? (
         <div className="scrim">
           {phase === "paused" ? (
             <section className="card">
-              <p className="kicker">Holding</p>
-              <h1>Paused</h1>
-              {room ? <p className="code-line">Room <strong>{room}</strong></p> : null}
+              <p className="kicker">Tactical Hold</p>
+              <h1>Mission Paused</h1>
+              {room ? (
+                <p className="code-line">
+                  Squad Frequency: <strong>{room}</strong>
+                </p>
+              ) : null}
+              <p>The labyrinth figures remain frozen while in tactical hold.</p>
               <div className="actions">
                 <button type="button" className="btn" onClick={() => api.current.resume()}>
-                  Resume
+                  <Play className="w-5 h-5 fill-current" />
+                  Resume Mission
                 </button>
                 {room ? (
                   <button type="button" className="btn btn-ghost" onClick={copyInvite}>
-                    {copied ? "Link copied" : "Copy invite link"}
+                    {copied ? (
+                      <>
+                        <Check className="w-4 h-4 text-emerald-400" /> Link Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-4 h-4" /> Copy Squad Invite Link
+                      </>
+                    )}
                   </button>
                 ) : null}
                 <button type="button" className="btn btn-ghost" onClick={() => api.current.menu()}>
-                  Home
+                  Abort to Headquarters
                 </button>
               </div>
             </section>
           ) : null}
 
           {phase === "won" ? (
-            <section className="card">
-              <p className="kicker">{hud.map}</p>
-              <h1>Labyrinth clear</h1>
-              <p>Every figure in this labyrinth is down.</p>
+            <section className="card card-won">
+              <p className="kicker text-emerald-400">// MISSION SUCCESSFUL</p>
+              <h1 className="text-emerald-300">Sector Purged</h1>
+              <p>
+                Outstanding work, Operative. All hostile entities in the {hud.map} labyrinth have been neutralized.
+              </p>
+              <div className="mt-4 p-4 rounded-xl bg-white/5 border border-white/10 flex justify-between items-center text-sm">
+                <div>
+                  <div className="text-[var(--color-muted)] text-xs uppercase font-mono">Hostiles Eliminated</div>
+                  <div className="text-xl font-bold text-emerald-400 mt-1">{hud.total} / {hud.total}</div>
+                </div>
+                <div>
+                  <div className="text-[var(--color-muted)] text-xs uppercase font-mono">Health Integrity</div>
+                  <div className="text-xl font-bold text-white mt-1">{hud.hp}%</div>
+                </div>
+              </div>
               <div className="actions">
                 <button type="button" className="btn" onClick={() => api.current.next()}>
-                  Next labyrinth
+                  <Sparkles className="w-5 h-5" />
+                  Advance to Next Sector
                 </button>
                 <button type="button" className="btn btn-ghost" onClick={() => api.current.again()}>
-                  Replay
+                  <RotateCcw className="w-4 h-4" />
+                  Replay Sector
                 </button>
                 <button type="button" className="btn btn-ghost" onClick={() => api.current.menu()}>
-                  Home
+                  Headquarters
                 </button>
               </div>
             </section>
           ) : null}
 
           {phase === "lost" ? (
-            <section className="card">
-              <p className="kicker">{hud.map}</p>
-              <h1>Down</h1>
-              <p>They got through. Use the barricades and try again, or pick another labyrinth at home.</p>
+            <section className="card card-lost">
+              <p className="kicker text-red-400">// OPERATIVE DOWN</p>
+              <h1 className="text-red-400">Critical Failure</h1>
+              <p>
+                The hostiles overwhelmed your defenses. Use barricades for cover and keep moving to avoid line of sight.
+              </p>
+              <div className="mt-4 p-4 rounded-xl bg-white/5 border border-white/10 flex justify-between items-center text-sm">
+                <div>
+                  <div className="text-[var(--color-muted)] text-xs uppercase font-mono">Hostiles Remaining</div>
+                  <div className="text-xl font-bold text-red-400 mt-1">{hud.foes}</div>
+                </div>
+                <div>
+                  <div className="text-[var(--color-muted)] text-xs uppercase font-mono">Sector</div>
+                  <div className="text-xl font-bold text-white mt-1">{hud.map}</div>
+                </div>
+              </div>
               <div className="actions">
                 <button type="button" className="btn" onClick={() => api.current.again()}>
-                  Retry
+                  <RotateCcw className="w-4 h-4" />
+                  Redeploy & Try Again
                 </button>
                 <button type="button" className="btn btn-ghost" onClick={() => api.current.menu()}>
-                  Home
+                  Headquarters
                 </button>
               </div>
             </section>
@@ -1121,6 +1243,7 @@ function Match({ map, name, room, onLeave }: Props) {
         </div>
       ) : null}
 
+      {/* Mobile Touch Controls */}
       <button type="button" className="swing" onClick={() => api.current.fire()}>
         Fire
       </button>
