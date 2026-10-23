@@ -16891,25 +16891,42 @@ var RawShaderMaterial = class extends ShaderMaterial {
 	}
 };
 /**
-* A material for non-shiny surfaces, without specular highlights.
+* A standard physically based material, using Metallic-Roughness workflow.
 *
-* The material uses a non-physically based [Lambertian](https://en.wikipedia.org/wiki/Lambertian_reflectance)
-* model for calculating reflectance. This can simulate some surfaces (such
-* as untreated wood or stone) well, but cannot simulate shiny surfaces with
-* specular highlights (such as varnished wood). `MeshLambertMaterial` uses per-fragment
+* Physically based rendering (PBR) has recently become the standard in many
+* 3D applications, such as [Unity](https://blogs.unity3d.com/2014/10/29/physically-based-shading-in-unity-5-a-primer/),
+* [Unreal](https://docs.unrealengine.com/latest/INT/Engine/Rendering/Materials/PhysicallyBased/) and
+* [3D Studio Max](http://area.autodesk.com/blogs/the-3ds-max-blog/what039s-new-for-rendering-in-3ds-max-2017).
+*
+* This approach differs from older approaches in that instead of using
+* approximations for the way in which light interacts with a surface, a
+* physically correct model is used. The idea is that, instead of tweaking
+* materials to look good under specific lighting, a material can be created
+* that will react 'correctly' under all lighting scenarios.
+*
+* In practice this gives a more accurate and realistic looking result than
+* the {@link MeshLambertMaterial} or {@link MeshPhongMaterial}, at the cost of
+* being somewhat more computationally expensive. `MeshStandardMaterial` uses per-fragment
 * shading.
 *
-* Due to the simplicity of the reflectance and illumination models,
-* performance will be greater when using this material over the
-* {@link MeshPhongMaterial}, {@link MeshStandardMaterial} or
-* {@link MeshPhysicalMaterial}, at the cost of some graphical accuracy.
+* Note that for best results you should always specify an environment map when using this material.
+*
+* For a non-technical introduction to the concept of PBR and how to set up a
+* PBR material, check out these articles by the people at [marmoset](https://www.marmoset.co):
+*
+* - [Basic Theory of Physically Based Rendering](https://www.marmoset.co/posts/basic-theory-of-physically-based-rendering/)
+* - [Physically Based Rendering and You Can Too](https://www.marmoset.co/posts/physically-based-rendering-and-you-can-too/)
+*
+* Technical details of the approach used in three.js (and most other PBR systems) can be found is this
+* [paper from Disney](https://media.disneyanimation.com/uploads/production/publication_asset/48/asset/s2012_pbs_disney_brdf_notes_v3.pdf)
+* (pdf), by Brent Burley.
 *
 * @augments Material
-* @demo scenes/material-browser.html#MeshLambertMaterial
+* @demo scenes/material-browser.html#MeshStandardMaterial
 */
-var MeshLambertMaterial = class extends Material {
+var MeshStandardMaterial = class extends Material {
 	/**
-	* Constructs a new mesh lambert material.
+	* Constructs a new mesh standard material.
 	*
 	* @param {Object} [parameters] - An object with one or more properties
 	* defining the material's appearance. Any property of the material
@@ -16926,8 +16943,9 @@ var MeshLambertMaterial = class extends Material {
 		* @readonly
 		* @default true
 		*/
-		this.isMeshLambertMaterial = true;
-		this.type = "MeshLambertMaterial";
+		this.isMeshStandardMaterial = true;
+		this.type = "MeshStandardMaterial";
+		this.defines = { "STANDARD": "" };
 		/**
 		* Color of the material.
 		*
@@ -16935,6 +16953,25 @@ var MeshLambertMaterial = class extends Material {
 		* @default (1,1,1)
 		*/
 		this.color = new Color(16777215);
+		/**
+		* How rough the material appears. `0.0` means a smooth mirror reflection, `1.0`
+		* means fully diffuse. If `roughnessMap` is also provided,
+		* both values are multiplied.
+		*
+		* @type {number}
+		* @default 1
+		*/
+		this.roughness = 1;
+		/**
+		* How much the material is like a metal. Non-metallic materials such as wood
+		* or stone use `0.0`, metallic use `1.0`, with nothing (usually) in between.
+		* A value between `0.0` and `1.0` could be used for a rusty metal look.
+		* If `metalnessMap` is also provided, both values are multiplied.
+		*
+		* @type {number}
+		* @default 0
+		*/
+		this.metalness = 0;
 		/**
 		* The color map. May optionally include an alpha channel, typically combined
 		* with {@link Material#transparent} or {@link Material#alphaTest}. The texture map
@@ -17100,16 +17137,27 @@ var MeshLambertMaterial = class extends Material {
 		*/
 		this.displacementBias = 0;
 		/**
-		* Specular map used by the material.
+		* The green channel of this texture is used to alter the roughness of the
+		* material.
 		*
-		* `specularMap` represents color data, and the texture must be assigned a
-		* {@link Texture#colorSpace}. Most `specularMap` textures set
-		* `texture.colorSpace = SRGBColorSpace`.
+		* `roughnessMap` represents non-color data. Any texture assigned must have
+		* `texture.colorSpace = NoColorSpace` (default).
 		*
 		* @type {?Texture}
 		* @default null
 		*/
-		this.specularMap = null;
+		this.roughnessMap = null;
+		/**
+		* The blue channel of this texture is used to alter the metalness of the
+		* material.
+		*
+		* `metalnessMap` represents non-color data. Any texture assigned must have
+		* `texture.colorSpace = NoColorSpace` (default).
+		*
+		* @type {?Texture}
+		* @default null
+		*/
+		this.metalnessMap = null;
 		/**
 		* The alpha map is a grayscale texture that controls the opacity across the
 		* surface (black: fully transparent; white: fully opaque).
@@ -17128,7 +17176,8 @@ var MeshLambertMaterial = class extends Material {
 		*/
 		this.alphaMap = null;
 		/**
-		* The environment map.
+		* The environment map. To ensure a physically correct rendering, environment maps
+		* are internally pre-processed with {@link PMREMGenerator}.
 		*
 		* `envMap` represents luminance data, and the texture must be assigned
 		* a {@link Texture#colorSpace}. Most `envMap` textures set
@@ -17147,40 +17196,12 @@ var MeshLambertMaterial = class extends Material {
 		*/
 		this.envMapRotation = new Euler();
 		/**
-		* How to combine the result of the surface's color with the environment map, if any.
-		*
-		* When set to `MixOperation`, the {@link MeshBasicMaterial#reflectivity} is used to
-		* blend between the two colors.
-		*
-		* @type {(MultiplyOperation|MixOperation|AddOperation)}
-		* @default MultiplyOperation
-		*/
-		this.combine = 0;
-		/**
-		* How much the environment map affects the surface.
-		* The valid range is between `0` (no reflections) and `1` (full reflections).
-		*
-		* @type {number}
-		* @default 1
-		*/
-		this.reflectivity = 1;
-		/**
 		* Scales the effect of the environment map by multiplying its color.
 		*
 		* @type {number}
 		* @default 1
 		*/
 		this.envMapIntensity = 1;
-		/**
-		* The index of refraction (IOR) of air (approximately 1) divided by the
-		* index of refraction of the material. It is used with environment mapping
-		* modes {@link CubeRefractionMapping} and {@link EquirectangularRefractionMapping}.
-		* The refraction ratio should not exceed `1`.
-		*
-		* @type {number}
-		* @default 0.98
-		*/
-		this.refractionRatio = .98;
 		/**
 		* Renders the geometry as a wireframe.
 		*
@@ -17233,7 +17254,10 @@ var MeshLambertMaterial = class extends Material {
 	}
 	copy(source) {
 		super.copy(source);
+		this.defines = { "STANDARD": "" };
 		this.color.copy(source.color);
+		this.roughness = source.roughness;
+		this.metalness = source.metalness;
 		this.map = source.map;
 		this.lightMap = source.lightMap;
 		this.lightMapIntensity = source.lightMapIntensity;
@@ -17250,14 +17274,12 @@ var MeshLambertMaterial = class extends Material {
 		this.displacementMap = source.displacementMap;
 		this.displacementScale = source.displacementScale;
 		this.displacementBias = source.displacementBias;
-		this.specularMap = source.specularMap;
+		this.roughnessMap = source.roughnessMap;
+		this.metalnessMap = source.metalnessMap;
 		this.alphaMap = source.alphaMap;
 		this.envMap = source.envMap;
 		this.envMapRotation.copy(source.envMapRotation);
-		this.combine = source.combine;
-		this.reflectivity = source.reflectivity;
 		this.envMapIntensity = source.envMapIntensity;
-		this.refractionRatio = source.refractionRatio;
 		this.wireframe = source.wireframe;
 		this.wireframeLinewidth = source.wireframeLinewidth;
 		this.wireframeLinecap = source.wireframeLinecap;
@@ -20071,6 +20093,38 @@ var DirectionalLight = class extends Light {
 		data.object.shadow = this.shadow.toJSON();
 		data.object.target = this.target.uuid;
 		return data;
+	}
+};
+/**
+* This light globally illuminates all objects in the scene equally.
+*
+* It cannot be used to cast shadows as it does not have a direction.
+*
+* ```js
+* const light = new THREE.AmbientLight( 0x404040 ); // soft white light
+* scene.add( light );
+* ```
+*
+* @augments Light
+*/
+var AmbientLight = class extends Light {
+	/**
+	* Constructs a new ambient light.
+	*
+	* @param {(number|Color|string)} [color=0xffffff] - The light's color.
+	* @param {number} [intensity=1] - The light's strength/intensity.
+	*/
+	constructor(color, intensity) {
+		super(color, intensity);
+		/**
+		* This flag can be used for type testing.
+		*
+		* @type {boolean}
+		* @readonly
+		* @default true
+		*/
+		this.isAmbientLight = true;
+		this.type = "AmbientLight";
 	}
 };
 var fov = -90;
@@ -31786,4 +31840,4 @@ var WebGLRenderer = class {
 	}
 };
 //#endregion
-export { SphereGeometry as S, PerspectiveCamera as _, Color as a, SRGBColorSpace as b, Fog as c, InstancedMesh as d, Line as f, Object3D as g, MeshLambertMaterial as h, BufferGeometry as i, Group as l, Mesh as m, BoxGeometry as n, CylinderGeometry as o, LineBasicMaterial as p, BufferAttribute as r, DirectionalLight as s, WebGLRenderer as t, HemisphereLight as u, PlaneGeometry as v, Scene as x, PointLight as y };
+export { SphereGeometry as C, Scene as S, Object3D as _, BufferGeometry as a, PointLight as b, DirectionalLight as c, HemisphereLight as d, InstancedMesh as f, MeshStandardMaterial as g, Mesh as h, BufferAttribute as i, Fog as l, LineBasicMaterial as m, AmbientLight as n, Color as o, Line as p, BoxGeometry as r, CylinderGeometry as s, WebGLRenderer as t, Group as u, PerspectiveCamera as v, SRGBColorSpace as x, PlaneGeometry as y };

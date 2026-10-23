@@ -16,6 +16,7 @@ type Hud = {
 
 type Foe = {
   mesh: THREE.Group;
+  light: THREE.PointLight;
   x: number;
   z: number;
   hp: number;
@@ -83,12 +84,158 @@ type Props = {
   onLeave: (map: MapId) => void;
 };
 
+function drawMinimap(
+  ctx: CanvasRenderingContext2D,
+  px: number,
+  pz: number,
+  yaw: number,
+  arena: Arena,
+  foes: Foe[],
+  remotes: Remote[],
+) {
+  const size = 180;
+  const half = size / 2;
+  const radius = half - 6;
+  const scale = 3.4; // 3.4 px per meter => ~25m radius
+
+  ctx.clearRect(0, 0, size, size);
+
+  // Circular radar frame
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(half, half, radius, 0, Math.PI * 2);
+  ctx.clip();
+
+  // Radar dark background
+  ctx.fillStyle = "rgba(8, 10, 16, 0.88)";
+  ctx.fill();
+
+  // Range rings
+  ctx.strokeStyle = "rgba(0, 210, 255, 0.14)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(half, half, radius * 0.45, 0, Math.PI * 2);
+  ctx.arc(half, half, radius * 0.82, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Crosshairs
+  ctx.beginPath();
+  ctx.moveTo(half, 0); ctx.lineTo(half, size);
+  ctx.moveTo(0, half); ctx.lineTo(size, half);
+  ctx.stroke();
+
+  // Rotate world around player position so forward is UP
+  ctx.translate(half, half);
+  ctx.rotate(-yaw);
+
+  // Draw maze walls
+  ctx.fillStyle = "rgba(90, 120, 150, 0.55)";
+  ctx.strokeStyle = "rgba(140, 180, 220, 0.75)";
+  ctx.lineWidth = 1;
+
+  for (const b of arena.walls) {
+    const bx = (b.minX + b.maxX) / 2;
+    const bz = (b.minZ + b.maxZ) / 2;
+    if (Math.hypot(bx - px, bz - pz) > 28) continue;
+    const x0 = (b.minX - px) * scale;
+    const z0 = (b.minZ - pz) * scale;
+    const w = (b.maxX - b.minX) * scale;
+    const h = (b.maxZ - b.minZ) * scale;
+    ctx.fillRect(x0, z0, w, h);
+    ctx.strokeRect(x0, z0, w, h);
+  }
+
+  // Draw barricades / shields
+  ctx.fillStyle = "rgba(224, 122, 40, 0.75)";
+  for (const s of arena.shields) {
+    if (Math.hypot(s.x - px, s.z - pz) > 26) continue;
+    const x0 = (s.x - s.w / 2 - px) * scale;
+    const z0 = (s.z - s.d / 2 - pz) * scale;
+    ctx.fillRect(x0, z0, s.w * scale, s.d * scale);
+  }
+
+  // Draw pumpkins
+  ctx.fillStyle = "rgba(255, 140, 20, 0.85)";
+  for (const p of arena.pumpkins) {
+    if (Math.hypot(p.x - px, p.z - pz) > 22) continue;
+    ctx.beginPath();
+    ctx.arc((p.x - px) * scale, (p.z - pz) * scale, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Draw living foes (pulsing red dots)
+  const pulse = 1 + Math.sin(performance.now() * 0.009) * 0.3;
+  for (const f of foes) {
+    if (!f.alive) continue;
+    const d = Math.hypot(f.x - px, f.z - pz);
+    if (d > 26) continue;
+    const fx = (f.x - px) * scale;
+    const fz = (f.z - pz) * scale;
+
+    ctx.fillStyle = "rgba(255, 30, 50, 0.3)";
+    ctx.beginPath();
+    ctx.arc(fx, fz, 6.5 * pulse, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#ff1e38";
+    ctx.beginPath();
+    ctx.arc(fx, fz, 3.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Draw squadmates (cyan dots)
+  ctx.fillStyle = "#00d2ff";
+  for (const r of remotes) {
+    const rx = (r.x - px) * scale;
+    const rz = (r.z - pz) * scale;
+    ctx.beginPath();
+    ctx.arc(rx, rz, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // Player tactical arrow in center (pointing UP)
+  ctx.save();
+  ctx.translate(half, half);
+  ctx.fillStyle = "#10f08c";
+  ctx.shadowColor = "rgba(16, 240, 140, 0.85)";
+  ctx.shadowBlur = 8;
+  ctx.beginPath();
+  ctx.moveTo(0, -8);
+  ctx.lineTo(5.5, 6);
+  ctx.lineTo(0, 2.5);
+  ctx.lineTo(-5.5, 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  // Outer border & compass markers
+  ctx.save();
+  ctx.strokeStyle = "rgba(0, 210, 255, 0.55)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(half, half, radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Compass North marker
+  ctx.font = "bold 10px 'Rajdhani', monospace";
+  ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const nAngle = -yaw - Math.PI / 2;
+  const nDist = radius - 8;
+  ctx.fillText("N", half + Math.cos(nAngle) * nDist, half + Math.sin(nAngle) * nDist);
+  ctx.restore();
+}
+
 export function ShooterGame(props: Props) {
   return <Match {...props} />;
 }
 
 function Match({ map, name, room, onLeave }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mapCanvasRef = useRef<HTMLCanvasElement>(null);
   const stickRef = useRef({ x: 0, y: 0 });
   const knobRef = useRef<HTMLDivElement>(null);
   const netRef = useRef<Net>(blankNet());
@@ -446,11 +593,13 @@ function Match({ map, name, room, onLeave }: Props) {
         eyeL.position.set(-0.08, 1.62, -0.22);
         const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
         eyeR.position.set(0.08, 1.62, -0.22);
-        group.add(torso, head, eyeL, eyeR);
+        const eyeLight = new THREE.PointLight(0xff1122, 14, 12, 1.8);
+        eyeLight.position.set(0, 1.5, -0.2);
+        group.add(torso, head, eyeL, eyeR, eyeLight);
         group.position.set(spot.x, 0, spot.z);
         group.frustumCulled = false;
         world.add(group);
-        return { mesh: group, x: spot.x, z: spot.z, hp: 100, cool: 0.6 + Math.random() * 0.8, alive: true };
+        return { mesh: group, light: eyeLight, x: spot.x, z: spot.z, hp: 100, cool: 0.6 + Math.random() * 0.8, alive: true };
       });
       aliveFoes = foes.length;
       pushHud(true);
@@ -487,8 +636,17 @@ function Match({ map, name, room, onLeave }: Props) {
       wantFire.current = true;
     }
 
+    const resetInput = () => {
+      held.clear();
+      stick.x = 0;
+      stick.y = 0;
+      vel.x = 0;
+      vel.z = 0;
+    };
+
     function enter() {
       if (dead) return;
+      resetInput();
       try {
         sfx.unlock();
       } catch {
@@ -502,6 +660,7 @@ function Match({ map, name, room, onLeave }: Props) {
 
     function pause() {
       if (phaseRef.current !== "play") return;
+      resetInput();
       setPhaseBoth("paused");
       try {
         document.exitPointerLock();
@@ -557,6 +716,7 @@ function Match({ map, name, room, onLeave }: Props) {
 
     const onKeyDown = (e: KeyboardEvent) => {
       held.add(e.code);
+      if (e.key) held.add(e.key.toLowerCase());
       if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
       if (e.code === "Escape") pause();
       if ((e.code === "KeyF" || e.code === "Space") && phaseRef.current === "play") shoot();
@@ -564,11 +724,15 @@ function Match({ map, name, room, onLeave }: Props) {
         enter();
       }
     };
-    const onKeyUp = (e: KeyboardEvent) => held.delete(e.code);
+    const onKeyUp = (e: KeyboardEvent) => {
+      held.delete(e.code);
+      if (e.key) held.delete(e.key.toLowerCase());
+    };
     const onBlur = () => {
-      held.clear();
-      stick.x = 0;
-      stick.y = 0;
+      resetInput();
+    };
+    const onFocus = () => {
+      resetInput();
     };
     const onMouse = (e: MouseEvent) => {
       if (document.pointerLockElement !== canvas || phaseRef.current !== "play") return;
@@ -579,6 +743,7 @@ function Match({ map, name, room, onLeave }: Props) {
     let sawLock = false;
     const onLock = () => {
       const locked = document.pointerLockElement === canvas;
+      resetInput();
       if (locked) sawLock = true;
       else if (sawLock && phaseRef.current === "play") {
         sawLock = false;
@@ -639,9 +804,16 @@ function Match({ map, name, room, onLeave }: Props) {
       if (document.pointerLockElement === canvas) shoot();
     };
 
+    const onVisibility = () => {
+      if (document.hidden) resetInput();
+    };
+
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
+    document.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("resize", resize);
     const ro = new ResizeObserver(() => resize());
     ro.observe(canvas);
@@ -694,6 +866,7 @@ function Match({ map, name, room, onLeave }: Props) {
       if (foe.hp <= 0) {
         foe.alive = false;
         foe.mesh.visible = false;
+        foe.light.intensity = 0;
         aliveFoes = foes.filter((f) => f.alive).length;
         pushHud(true);
       }
@@ -791,7 +964,7 @@ function Match({ map, name, room, onLeave }: Props) {
       flash.intensity = flashT > 0 ? 12 : 0;
 
       if (playing) {
-        const turn = (held.has("KeyQ") ? 1 : 0) - (held.has("KeyE") ? 1 : 0);
+        const turn = (held.has("KeyQ") || held.has("q") ? 1 : 0) - (held.has("KeyE") || held.has("e") ? 1 : 0);
         yaw += turn * 2.4 * dt;
         if (lookId !== null && edge !== 0) yaw -= edge * 2.6 * dt;
 
@@ -801,19 +974,19 @@ function Match({ map, name, room, onLeave }: Props) {
         const rz = -Math.sin(yaw);
         let wx = 0;
         let wz = 0;
-        if (held.has("KeyW") || held.has("ArrowUp")) {
+        if (held.has("KeyW") || held.has("ArrowUp") || held.has("w")) {
           wx += fx;
           wz += fz;
         }
-        if (held.has("KeyS") || held.has("ArrowDown")) {
+        if (held.has("KeyS") || held.has("ArrowDown") || held.has("s")) {
           wx -= fx;
           wz -= fz;
         }
-        if (held.has("KeyD") || held.has("ArrowRight")) {
+        if (held.has("KeyD") || held.has("ArrowRight") || held.has("d")) {
           wx += rx;
           wz += rz;
         }
-        if (held.has("KeyA") || held.has("ArrowLeft")) {
+        if (held.has("KeyA") || held.has("ArrowLeft") || held.has("a")) {
           wx -= rx;
           wz -= rz;
         }
@@ -831,10 +1004,23 @@ function Match({ map, name, room, onLeave }: Props) {
         const target = (sprint ? SPRINT : WALK) * clipped;
         const wishX = mag > 0 ? (wx / mag) * target : 0;
         const wishZ = mag > 0 ? (wz / mag) * target : 0;
-        const k = 1 - Math.exp(-14 * dt);
-        vel.x += (wishX - vel.x) * k;
-        vel.z += (wishZ - vel.z) * k;
+        if (mag === 0) {
+          vel.x *= Math.exp(-26 * dt);
+          vel.z *= Math.exp(-26 * dt);
+          if (Math.abs(vel.x) < 0.02) vel.x = 0;
+          if (Math.abs(vel.z) < 0.02) vel.z = 0;
+        } else {
+          const k = 1 - Math.exp(-18 * dt);
+          vel.x += (wishX - vel.x) * k;
+          vel.z += (wishZ - vel.z) * k;
+        }
         const moved = resolveMove(px, pz, vel.x * dt, vel.z * dt, RADIUS, boxes);
+        if (Math.abs(moved.x - px) < 1e-4 && Math.abs(vel.x) > 0.01) {
+          vel.x = 0;
+        }
+        if (Math.abs(moved.z - pz) < 1e-4 && Math.abs(vel.z) > 0.01) {
+          vel.z = 0;
+        }
         px = moved.x;
         pz = moved.z;
 
@@ -902,8 +1088,33 @@ function Match({ map, name, room, onLeave }: Props) {
             const ndx = toX / dist;
             const ndz = toZ / dist;
             const see = rayBoxes(f.x, 1.4, f.z, ndx, 0, ndz, dist, boxes) >= dist - 0.3;
-            if (dist > 6.5 || !see) {
-              const step = resolveMove(f.x, f.z, ndx * 3.1 * dt, ndz * 3.1 * dt, FOE_R, boxes);
+            if (dist > 1.1) {
+              const speed = 3.2;
+              let step = resolveMove(f.x, f.z, ndx * speed * dt, ndz * speed * dt, FOE_R, boxes);
+              if (Math.hypot(step.x - f.x, step.z - f.z) < 0.001) {
+                // Try X axis slide along corridor
+                const stepX = resolveMove(f.x, f.z, ndx * speed * dt, 0, FOE_R, boxes);
+                if (Math.hypot(stepX.x - f.x, stepX.z - f.z) > 0.001) {
+                  step = stepX;
+                } else {
+                  // Try Z axis slide along corridor
+                  const stepZ = resolveMove(f.x, f.z, 0, ndz * speed * dt, FOE_R, boxes);
+                  if (Math.hypot(stepZ.x - f.x, stepZ.z - f.z) > 0.001) {
+                    step = stepZ;
+                  } else {
+                    // Try perpendicular corridor turn
+                    const perpA = resolveMove(f.x, f.z, -ndz * speed * dt, ndx * speed * dt, FOE_R, boxes);
+                    if (Math.hypot(perpA.x - f.x, perpA.z - f.z) > 0.001) {
+                      step = perpA;
+                    } else {
+                      const perpB = resolveMove(f.x, f.z, ndz * speed * dt, -ndx * speed * dt, FOE_R, boxes);
+                      if (Math.hypot(perpB.x - f.x, perpB.z - f.z) > 0.001) {
+                        step = perpB;
+                      }
+                    }
+                  }
+                }
+              }
               f.x = step.x;
               f.z = step.z;
             }
@@ -1037,6 +1248,13 @@ function Match({ map, name, room, onLeave }: Props) {
         if (!dead) setHurt(false);
       }
       gl.render(scene, camera);
+
+      if (mapCanvasRef.current && arena) {
+        const mctx = mapCanvasRef.current.getContext("2d");
+        if (mctx) {
+          drawMinimap(mctx, px, pz, yaw, arena, foes, Array.from(net.remotes.values()));
+        }
+      }
     };
     gl.setAnimationLoop(frame);
 
@@ -1045,7 +1263,10 @@ function Match({ map, name, room, onLeave }: Props) {
       gl.setAnimationLoop(null);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
+      document.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("resize", resize);
       ro.disconnect();
       document.removeEventListener("mousemove", onMouse);
@@ -1126,6 +1347,12 @@ function Match({ map, name, room, onLeave }: Props) {
           </div>
 
           <div className="stack stack-end">
+            {phase === "play" ? (
+              <div className="minimap-wrap">
+                <canvas ref={mapCanvasRef} width={180} height={180} className="minimap-canvas" />
+                <div className="minimap-badge">TACTICAL RADAR</div>
+              </div>
+            ) : null}
             {phase === "play" ? (
               <button type="button" className="icon-btn" onClick={() => api.current.pause()} aria-label="Pause Mission">
                 <Pause />

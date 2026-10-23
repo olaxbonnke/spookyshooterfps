@@ -1,6 +1,5 @@
-@import "tailwindcss";
-
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=Rajdhani:wght@500;600;700&display=swap');
+@import "tailwindcss";
 
 @theme {
   --color-bg: #090a0f;
@@ -184,6 +183,58 @@
 
 .stack-end {
   align-items: flex-end;
+  gap: 12px;
+}
+
+/* Tactical Minimap Radar */
+.minimap-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-radius: 50%;
+  padding: 3px;
+  background: radial-gradient(circle at center, rgba(16, 22, 34, 0.95), rgba(8, 10, 16, 0.98));
+  border: 1px solid rgba(0, 210, 255, 0.35);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.65), 0 0 20px rgba(0, 210, 255, 0.2), inset 0 0 15px rgba(0, 210, 255, 0.08);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.minimap-canvas {
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  display: block;
+}
+
+.minimap-badge {
+  position: absolute;
+  bottom: -6px;
+  font-family: var(--font-display, "Rajdhani", sans-serif);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #00d2ff;
+  background: rgba(10, 14, 22, 0.92);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 210, 255, 0.4);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+@media (max-width: 768px) {
+  .minimap-canvas {
+    width: 100px;
+    height: 100px;
+  }
+  .minimap-badge {
+    font-size: 0.55rem;
+    padding: 1px 6px;
+    bottom: -4px;
+  }
 }
 
 .chip {

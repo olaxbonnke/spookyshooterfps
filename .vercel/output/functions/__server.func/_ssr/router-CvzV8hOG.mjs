@@ -1,8 +1,8 @@
 import { o as __toESM } from "../_runtime.mjs";
 import { _ as createFileRoute, b as useRouter, d as Scripts, f as HeadContent, g as lazyRouteComponent, h as Outlet, m as createRouter, q as require_react, v as createRootRoute, x as require_jsx_runtime } from "../_libs/@tanstack/react-router+[...].mjs";
-import { t as TriangleAlert } from "../_libs/lucide-react.mjs";
+import { i as TriangleAlert } from "../_libs/lucide-react.mjs";
 import { a as number, c as union, i as literal, l as unknown, n as _enum, o as object, r as discriminatedUnion, s as string, t as number$1 } from "../_libs/zod.mjs";
-//#region node_modules/.nitro/vite/services/ssr/assets/router-DolqMcv4.js
+//#region node_modules/.nitro/vite/services/ssr/assets/router-CvzV8hOG.js
 var import_react = /* @__PURE__ */ __toESM(require_react());
 var import_jsx_runtime = require_jsx_runtime();
 var __defProp = Object.defineProperty;
@@ -340,7 +340,7 @@ function PreviewHostBridge() {
 	}, [router]);
 	return null;
 }
-var styles_default = "/assets/styles-Bqd79Bon.css";
+var styles_default = "/assets/styles-CwWSRydX.css";
 var APP_NAME = "Spooky Labyrinth FPS Shooter";
 var Route$3 = createRootRoute({
 	head: () => ({
@@ -390,7 +390,7 @@ var Route$3 = createRootRoute({
 		] })]
 	})
 });
-var $$splitComponentImporter$1 = () => import("./routes-BcyYIGUI.mjs");
+var $$splitComponentImporter$1 = () => import("./routes-B2tBduG1.mjs");
 var homeSearch = object({
 	map: _enum([
 		"grass",
@@ -403,7 +403,7 @@ var Route$2 = createFileRoute("/")({
 	validateSearch: homeSearch,
 	component: lazyRouteComponent($$splitComponentImporter$1, "component")
 });
-var $$splitComponentImporter = () => import("./play-fi7mtkL6.mjs");
+var $$splitComponentImporter = () => import("./play-DD2QZpDg.mjs");
 var playSearch = object({
 	map: _enum([
 		"grass",

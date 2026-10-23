@@ -1,4 +1,4 @@
-import { generateMaze, type Cell, type MazeData } from "./maze";
+import { bfs, generateMaze, type Cell, type MazeData } from "./maze";
 
 export type MapId = "grass" | "brick" | "palace";
 
@@ -31,6 +31,7 @@ export type Arena = {
   shields: Cover[];
   pumpkins: Pumpkin[];
   foes: { x: number; z: number }[];
+  maze: MazeData;
 };
 
 const CELL = 4.6;
@@ -149,15 +150,69 @@ function makeArena(theme: Theme): Arena {
   const rng = mulberry32(theme.seed ^ 0x9e3779b9);
   const walls = wallBoxes(maze);
   const start = center(maze.start.c, maze.start.r);
+
+  // Distribute enemies across near, mid, and far sectors using BFS distance from spawn
+  const dist = bfs(maze.cells, theme.cols, theme.rows, maze.start.c, maze.start.r);
+  const nearSpots: { c: number; r: number }[] = [];
+  const midSpots: { c: number; r: number }[] = [];
+  const farSpots: { c: number; r: number }[] = [];
+
+  for (let r = 0; r < theme.rows; r++) {
+    for (let c = 0; c < theme.cols; c++) {
+      const d = dist[r][c];
+      if (d <= 2) continue; // Keep immediate spawn clear so player isn't instantly ambushed
+      if (d >= 3 && d <= 5) nearSpots.push({ c, r });
+      else if (d >= 6 && d <= 11) midSpots.push({ c, r });
+      else if (d >= 12) farSpots.push({ c, r });
+    }
+  }
+
+  const shuffle = <T>(arr: T[]) => {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  };
+  shuffle(nearSpots);
+  shuffle(midSpots);
+  shuffle(farSpots);
+
+  const targetFoes = theme.id === "grass" ? 8 : theme.id === "brick" ? 10 : 12;
   const foeKeys = new Set<string>();
   const foes: { x: number; z: number }[] = [];
-  const spots = [...maze.gems, maze.exit];
-  for (const spot of spots) {
+  const addFoe = (spot: { c: number; r: number }) => {
     const key = `${spot.c},${spot.r}`;
-    if (foeKeys.has(key) || (spot.c === 0 && spot.r === 0)) continue;
+    if (foeKeys.has(key)) return false;
     foeKeys.add(key);
     foes.push(center(spot.c, spot.r));
-    if (foes.length >= 12) break;
+    return true;
+  };
+
+  // 1. Guaranteed near encounters (2 foes within 3-5 steps from start for early action)
+  for (const s of nearSpots) {
+    if (foes.length >= 2) break;
+    addFoe(s);
+  }
+
+  // 2. Guaranteed far/objective encounters (exit + gems)
+  const keySpots = [maze.exit, ...maze.gems];
+  shuffle(keySpots);
+  for (const s of keySpots) {
+    if (foes.length >= Math.floor(targetFoes * 0.6)) break;
+    addFoe(s);
+  }
+
+  // 3. Mid-range corridor / intersection encounters
+  for (const s of midSpots) {
+    if (foes.length >= targetFoes) break;
+    addFoe(s);
+  }
+
+  // 4. Fill any remaining quota from farSpots or nearSpots
+  for (const s of [...farSpots, ...nearSpots]) {
+    if (foes.length >= targetFoes) break;
+    addFoe(s);
   }
 
   const shields: Cover[] = [];
@@ -233,6 +288,7 @@ function makeArena(theme: Theme): Arena {
     shields,
     pumpkins,
     foes,
+    maze,
   };
 }
 

@@ -57,7 +57,7 @@ function neighbors(cells: Cell[][], c: number, r: number) {
   return out;
 }
 
-function bfs(cells: Cell[][], cols: number, rows: number, sc: number, sr: number) {
+export function bfs(cells: Cell[][], cols: number, rows: number, sc: number, sr: number) {
   const dist = Array.from({ length: rows }, () => Array<number>(cols).fill(-1));
   const q: { c: number; r: number }[] = [{ c: sc, r: sr }];
   dist[sr][sc] = 0;

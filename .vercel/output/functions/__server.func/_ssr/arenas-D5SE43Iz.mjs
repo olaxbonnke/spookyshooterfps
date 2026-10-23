@@ -1,4 +1,4 @@
-//#region node_modules/.nitro/vite/services/ssr/assets/arenas-BLSnc4-n.js
+//#region node_modules/.nitro/vite/services/ssr/assets/arenas-D5SE43Iz.js
 var DIRS = [
 	{
 		dir: "n",
@@ -308,15 +308,63 @@ function makeArena(theme) {
 	const rng = mulberry32(theme.seed ^ 2654435769);
 	const walls = wallBoxes(maze);
 	const start = center(maze.start.c, maze.start.r);
+	const dist = bfs(maze.cells, theme.cols, theme.rows, maze.start.c, maze.start.r);
+	const nearSpots = [];
+	const midSpots = [];
+	const farSpots = [];
+	for (let r = 0; r < theme.rows; r++) for (let c = 0; c < theme.cols; c++) {
+		const d = dist[r][c];
+		if (d <= 2) continue;
+		if (d >= 3 && d <= 5) nearSpots.push({
+			c,
+			r
+		});
+		else if (d >= 6 && d <= 11) midSpots.push({
+			c,
+			r
+		});
+		else if (d >= 12) farSpots.push({
+			c,
+			r
+		});
+	}
+	const shuffle = (arr) => {
+		for (let i = arr.length - 1; i > 0; i--) {
+			const j = Math.floor(rng() * (i + 1));
+			[arr[i], arr[j]] = [arr[j], arr[i]];
+		}
+		return arr;
+	};
+	shuffle(nearSpots);
+	shuffle(midSpots);
+	shuffle(farSpots);
+	const targetFoes = theme.id === "grass" ? 8 : theme.id === "brick" ? 10 : 12;
 	const foeKeys = /* @__PURE__ */ new Set();
 	const foes = [];
-	const spots = [...maze.gems, maze.exit];
-	for (const spot of spots) {
+	const addFoe = (spot) => {
 		const key = `${spot.c},${spot.r}`;
-		if (foeKeys.has(key) || spot.c === 0 && spot.r === 0) continue;
+		if (foeKeys.has(key)) return false;
 		foeKeys.add(key);
 		foes.push(center(spot.c, spot.r));
-		if (foes.length >= 12) break;
+		return true;
+	};
+	for (const s of nearSpots) {
+		if (foes.length >= 2) break;
+		addFoe(s);
+	}
+	const keySpots = [maze.exit, ...maze.gems];
+	shuffle(keySpots);
+	for (const s of keySpots) {
+		if (foes.length >= Math.floor(targetFoes * .6)) break;
+		addFoe(s);
+	}
+	for (const s of midSpots) {
+		if (foes.length >= targetFoes) break;
+		addFoe(s);
+	}
+	for (const s of [...farSpots, ...nearSpots]) {
+		if (foes.length >= targetFoes) break;
+		addFoe(s);
 	}
 	const shields = [];
 	const boxes = walls.slice();
@@ -376,8 +424,8 @@ function makeArena(theme) {
 		line: theme.line,
 		sky: theme.sky,
 		fog: theme.fog,
-		fogNear: 7,
-		fogFar: 34,
+		fogNear: 10,
+		fogFar: 46,
 		floor: theme.floor,
 		wall: theme.wall,
 		trim: theme.trim,
@@ -396,7 +444,8 @@ function makeArena(theme) {
 		walls,
 		shields,
 		pumpkins,
-		foes
+		foes,
+		maze
 	};
 }
 var ARENAS = THEMES.map(makeArena);
